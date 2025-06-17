@@ -550,6 +550,11 @@ class StabilityCluster:
                 )
                 node.ssh_command(f"sudo chmod 777 {node_artifact_path}", raise_on_error=False)
 
+            node.copy_file_or_dir(
+                self.slice_directory,
+                '/Berkanavt/kikimr/cfg/cluster.yaml'
+            )
+
     def get_workload_outputs(self, mode='err', last_n_lines=10):
         """Capture last N lines of output from all running workload screens."""
         logging.getLogger().setLevel(logging.WARNING)
