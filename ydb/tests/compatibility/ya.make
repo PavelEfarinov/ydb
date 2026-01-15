@@ -36,6 +36,7 @@ TEST_SRCS(
     udf/test_digest_regression.py
 )
 
+TAG(ya:manual)
 SIZE(LARGE)
 REQUIREMENTS(cpu:16)
 INCLUDE(${ARCADIA_ROOT}/ydb/tests/large.inc)
