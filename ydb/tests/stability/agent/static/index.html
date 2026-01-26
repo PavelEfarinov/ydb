@@ -1,0 +1,99 @@
+<script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+<script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+
+<div id="app" class="p-4">
+<h1>{{ message }}</h1>
+
+<div class="flex gap-2 mb-4">
+  <select v-model="selectedType" class="select select-bordered w-full max-w-xs">
+    <option disabled value="">Select process type</option>
+    <option v-for="type in processTypes" :key="type" :value="type">{{ type }}</option>
+  </select>
+  <button @click="create_process" class="btn btn-primary" :disabled="!selectedType">Create Process</button>
+  <button @click="get_processes" class="btn btn-ghost">Refresh</button>
+</div>
+
+<div v-for="(procs, type) in groupedProcesses" :key="type" class="mb-8">
+  <h2 class="text-2xl font-bold mb-4 capitalize">{{ type }} Processes</h2>
+  <div class="grid gap-4">
+    <process-card
+      v-for="proc in procs"
+      :process_data="proc"
+      :key="proc.id"
+    ></process-card>
+  </div>
+</div>
+</div>
+
+<script type="module">
+  import ProcessCard from './ProcessCard.js'
+  const { createApp, ref, computed } = Vue
+
+  createApp({
+    components: {
+      ProcessCard
+    },
+    setup() {
+      const message = ref('Nemesis agent @ [host FQDN]')
+      const processes = ref([])
+      const processTypes = ref([])
+      const selectedType = ref('')
+
+      const groupedProcesses = computed(() => {
+        const groups = {}
+        processes.value.forEach(proc => {
+          const type = proc.type || 'unknown'
+          if (!groups[type]) {
+            groups[type] = []
+          }
+          groups[type].push(proc)
+        })
+        return groups
+      })
+
+      function get_process_types() {
+        axios.get('/api/process_types')
+          .then(response => {
+            processTypes.value = response.data
+          })
+      }
+
+      function get_processes() {
+        axios
+          .get('/api/processes')
+          .then(response => {
+            processes.value = response.data
+          })
+      }
+
+      function create_process() {
+        if (!selectedType.value) return
+        
+        axios
+          .post('/api/processes', { type: selectedType.value })
+          .then(() => {
+            get_processes()
+          })
+      }
+
+      // Initial load
+      get_process_types()
+      get_processes()
+      
+      // Polling every 1 second
+      setInterval(get_processes, 1000)
+
+      return {
+        message,
+        processes,
+        processTypes,
+        selectedType,
+        groupedProcesses,
+        get_processes,
+        create_process
+      }
+    }
+  }).mount('#app')
+</script>

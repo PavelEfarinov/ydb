@@ -1,0 +1,28 @@
+From 50a371567d7770bb2b6bee9360c24f4be7f97769 Mon Sep 17 00:00:00 2001
+From: Stanislav Zmiev <zmievsa@gmail.com>
+Date: Sun, 9 Nov 2025 12:36:23 +0400
+Subject: [PATCH] Make depends and Security hashable again
+
+---
+ fastapi/params.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/fastapi/params.py b/fastapi/params.py
+index 6a58d5808e006..cf71264230a79 100644
+--- a/fastapi/params.py
++++ b/fastapi/params.py
+@@ -762,12 +762,12 @@ def __init__(
+         )
+ 
+ 
+-@dataclass
++@dataclass(unsafe_hash=True)
+ class Depends:
+     dependency: Optional[Callable[..., Any]] = None
+     use_cache: bool = True
+ 
+ 
+-@dataclass
++@dataclass(unsafe_hash=True)
+ class Security(Depends):
+     scopes: Optional[Sequence[str]] = None
