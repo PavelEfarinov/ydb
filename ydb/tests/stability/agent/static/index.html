@@ -4,54 +4,72 @@
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 
 <div id="app" class="p-4">
-<h1>{{ message }}</h1>
-
-<div class="flex gap-2 mb-4">
-  <select v-model="selectedType" class="select select-bordered w-full max-w-xs">
-    <option disabled value="">Select process type</option>
-    <option v-for="type in processTypes" :key="type" :value="type">{{ type }}</option>
-  </select>
-  <button @click="create_process" class="btn btn-primary" :disabled="!selectedType">Create Process</button>
-  <button @click="get_processes" class="btn btn-ghost">Refresh</button>
-</div>
-
-<div v-for="(procs, type) in groupedProcesses" :key="type" class="mb-8">
-  <h2 class="text-2xl font-bold mb-4 capitalize">{{ type }} Processes</h2>
-  <div class="grid gap-4">
-    <process-card
-      v-for="proc in procs"
-      :process_data="proc"
-      :key="proc.id"
-    ></process-card>
+  <div class="flex justify-between items-center mb-4">
+    <h1 class="text-2xl font-bold">{{ message }}</h1>
+    <div class="flex gap-2">
+      <select v-model="selectedType" class="select select-bordered w-full max-w-xs">
+        <option disabled value="">Select process type</option>
+        <option v-for="type in processTypes" :key="type" :value="type">{{ type }}</option>
+      </select>
+      <button class="btn btn-primary" :disabled="!selectedType" @click="createProcess">Create Process</button>
+    </div>
   </div>
-</div>
+
+  <div class="grid grid-cols-12 gap-6">
+    <!-- Left Column: Processes (9 cols) -->
+    <div class="col-span-9">
+      <process-type-group v-for="type in processTypes" :key="type" :type="type" :hosts="hosts"
+        :processes="getProcessesByType(type)"></process-type-group>
+    </div>
+
+    <!-- Right Column: Hosts Status (3 cols) -->
+    <div class="col-span-3">
+      <div class="sticky top-4">
+        <h2 class="text-xl font-bold mb-4">Hosts Status</h2>
+        <div class="badge badge-sm badge-error" v-show="hostsFetchError != null">Host fetch error</div>
+        <ul class="menu bg-base-100 w-full rounded-box shadow-xl">
+          <host-status-item v-for="(host_data, host) in hosts" :host_data="host_data" :host="host"
+            :key="host"></host-status-item>
+        </ul>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script type="module">
-  import ProcessCard from './ProcessCard.js'
+  import HostStatusItem from './HostStatusItem.js'
+  import ProcessTypeGroup from './ProcessTypeGroup.js'
+
   const { createApp, ref, computed } = Vue
 
   createApp({
     components: {
-      ProcessCard
+      HostStatusItem,
+      ProcessTypeGroup
     },
     setup() {
-      const message = ref('Nemesis agent @ [host FQDN]')
-      const processes = ref([])
-      const processTypes = ref([])
+      const message = ref('Nemesis Dashboard')
+      const hosts = ref({})
+      const hostsFetchError = ref(null)
       const selectedType = ref('')
+      const processTypes = ref([])
+      const processes = ref({}) // { host: [ProcessInfo, ...] }
 
-      const groupedProcesses = computed(() => {
-        const groups = {}
-        processes.value.forEach(proc => {
-          const type = proc.type || 'unknown'
-          if (!groups[type]) {
-            groups[type] = []
-          }
-          groups[type].push(proc)
-        })
-        return groups
-      })
+      function get_hosts_health() {
+        return axios
+          .get('/api/hosts/health')
+          .then(response => {
+            hosts.value = response.data
+            hostsFetchError.value = null
+            // After getting hosts, fetch processes for each
+            Object.keys(hosts.value).forEach(host => {
+              get_host_processes(host)
+            })
+          })
+          .catch(err => {
+            hostsFetchError.value = err
+          })
+      }
 
       function get_process_types() {
         axios.get('/api/process_types')
@@ -60,39 +78,54 @@
           })
       }
 
-      function get_processes() {
-        axios
-          .get('/api/processes')
+      function getProcessesByType(type) {
+        const result = {}
+        for (const host in processes.value) {
+          result[host] = (processes.value[host] || []).filter(p => p.type === type)
+        }
+        return result
+      }
+
+      function get_host_processes(host) {
+        axios.get(`/api/${host}/processes`)
           .then(response => {
-            processes.value = response.data
+            processes.value[host] = response.data
+          })
+          .catch(err => {
+            console.error(`Failed to fetch processes for ${host}`, err)
+            processes.value[host] = []
           })
       }
 
-      function create_process() {
+      function createProcess() {
         if (!selectedType.value) return
-        
-        axios
-          .post('/api/processes', { type: selectedType.value })
+
+        axios.post('/api/hosts/processes', { type: selectedType.value })
           .then(() => {
-            get_processes()
+            // Refresh data after creation
+            setTimeout(() => {
+              Object.keys(hosts.value).forEach(host => get_host_processes(host))
+            }, 500)
           })
       }
 
       // Initial load
+      get_hosts_health()
       get_process_types()
-      get_processes()
-      
-      // Polling every 1 second
-      setInterval(get_processes, 1000)
+
+      // Poll every 5 seconds
+      setInterval(() => {
+        get_hosts_health()
+      }, 50000)
 
       return {
         message,
-        processes,
+        hosts,
         processTypes,
         selectedType,
-        groupedProcesses,
-        get_processes,
-        create_process
+        processes,
+        createProcess,
+        getProcessesByType
       }
     }
   }).mount('#app')

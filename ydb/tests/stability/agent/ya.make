@@ -2,6 +2,8 @@ PY3_PROGRAM()
 
 PY_SRCS(
     __main__.py
+    install.py
+    config.py
 )
 
 DATA(
@@ -28,7 +30,9 @@ PEERDIR(
     ydb/tests/library/wardens
     contrib/python/aiocache
     contrib/python/fastapi
-    contrib/python/pydantic
+    # contrib/python/pydantic
+    contrib/python/pydantic-settings
+    contrib/python/python-dotenv
 )
 
 END()
