@@ -24,3 +24,8 @@ class CreateProcessRequest(BaseModel):
 class SetScheduleRequest(BaseModel):
     type: str
     enabled: bool
+
+
+class CreateHostProcessRequest(BaseModel):
+    host: str
+    type: str

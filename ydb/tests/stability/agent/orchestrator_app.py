@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from ydb.tests.stability.agent import config
 from ydb.tests.stability.agent.defaults import PROCESS_TYPES
 from ydb.tests.stability.agent.install import get_hosts_from_yaml, install_on_hosts, stop_agent_services
-from ydb.tests.stability.agent.models import ProcessInfo, SetScheduleRequest
+from ydb.tests.stability.agent.models import ProcessInfo, SetScheduleRequest, CreateHostProcessRequest
 from ydb.tests.library.stability.healthcheck.healthcheck_reporter import HealthCheckReporter
 import asyncio
 
@@ -103,6 +103,21 @@ async def get_all_processes():
     tasks = [fetch_host_processes(host) for host in hosts]
     results = await asyncio.gather(*tasks)
     return {host: procs for host, procs in results}
+
+
+@app.post("/api/hosts/process", response_model=Dict[str, Any])
+async def create_host_process(req: CreateHostProcessRequest):
+    if req.type not in PROCESS_TYPES:
+        return {"status": "error", "message": "Invalid process type"}
+    if req.host not in hosts:
+        return {"status": "error", "message": "Invalid host"}
+
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: requests.post(f"http://{req.host}:31434/api/processes", json={'type': req.type}, timeout=5))
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 @app.get("/api/process_types", response_model=List[str])

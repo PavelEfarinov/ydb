@@ -21,12 +21,14 @@ export default {
       previousProcesses
     }
   },
+  emits: ['run-process'],
   template: `
     <div class="collapse collapse-arrow bg-base-200 mb-2">
-      <input type="checkbox" /> 
+      <input type="checkbox" />
       <div class="collapse-title font-medium flex justify-between items-center pr-12">
         <div class="flex items-center gap-2">
           <span class="font-mono font-bold">{{ host }}</span>
+          <button class="btn btn-xs btn-primary z-10" @click.stop="$emit('run-process', host)">Run</button>
         </div>
         
         <div v-if="latestProcess" class="flex items-center gap-4">

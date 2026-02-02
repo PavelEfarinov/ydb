@@ -35,6 +35,16 @@ export default {
         })
     }
 
+    function runProcess(host) {
+      axios.post('/api/hosts/process', { host: host, type: props.type })
+        .then(() => {
+          console.log(`Started process ${props.type} on ${host}`)
+        })
+        .catch(err => {
+          console.error(`Failed to start process ${props.type} on ${host}`, err)
+        })
+    }
+
     function getProcessesByTypeAndHost(host) {
       const hostProcs = props.processes[host] || []
       return hostProcs
@@ -45,6 +55,7 @@ export default {
       isExpanded,
       isEnabled,
       toggleSchedule,
+      runProcess,
       getProcessesByTypeAndHost
     }
   },
@@ -80,11 +91,12 @@ export default {
         </div>
         
         <div v-show="isExpanded" class="mt-4">
-          <host-process-item 
-            v-for="(hostData, host) in hosts" 
+          <host-process-item
+            v-for="(hostData, host) in hosts"
             :key="host"
             :host="host"
             :processes="getProcessesByTypeAndHost(host)"
+            @run-process="runProcess"
           ></host-process-item>
         </div>
       </div>
