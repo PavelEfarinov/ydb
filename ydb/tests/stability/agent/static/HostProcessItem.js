@@ -31,7 +31,7 @@ export default {
         
         <div v-if="latestProcess" class="flex items-center gap-4">
           <span class="text-sm opacity-70">Last run:</span>
-          <div aria-label="status" class="status badge" :class="{
+          <div aria-label="status" class="badge" :class="{
             'badge-success': latestProcess.status === 'finished',
             'badge-error': latestProcess.status === 'failed' || latestProcess.status === 'error',
             'badge-warning': latestProcess.status === 'running'

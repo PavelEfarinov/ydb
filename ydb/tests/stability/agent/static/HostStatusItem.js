@@ -2,15 +2,26 @@ export default {
   props: {
     host_data: Object,
     host: String,
+    healthcheck: Object
   },
   template: `
-    <li class="list-row">
-      <div class="font-mono text-sm">{{ host }} 
-        <div class="badge badge-sm" :class="{
+    <tr>
+      <td class="font-mono text-s">{{ host }}</td>
+      <td>
+        <div class="badge badge-s" :class="{
           'badge-success': host_data.status === 'ok',
           'badge-error': host_data.status != 'ok'
         }">{{ host_data.status }}</div>
-      </div>
-    </li>
+      </td>
+      <td>
+        <div v-if="healthcheck" class="badge badge-s" :class="{
+          'badge-success': healthcheck.self_check_result === 'GOOD',
+          'badge-warning': healthcheck.self_check_result === 'DEGRADED',
+          'badge-neutral': healthcheck.self_check_result === 'HC_RESULT_ERROR',
+          'badge-error': !['GOOD', 'DEGRADED', 'HC_RESULT_ERROR'].includes(healthcheck.self_check_result)
+        }">{{ healthcheck.self_check_result }}</div>
+        <div v-else class="badge badge-s badge-ghost">N/A</div>
+      </td>
+    </tr>
   `
 }

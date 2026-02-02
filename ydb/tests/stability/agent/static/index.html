@@ -6,31 +6,35 @@
 <div id="app" class="p-4">
   <div class="flex justify-between items-center mb-4">
     <h1 class="text-2xl font-bold">{{ message }}</h1>
-    <div class="flex gap-2">
-      <select v-model="selectedType" class="select select-bordered w-full max-w-xs">
-        <option disabled value="">Select process type</option>
-        <option v-for="type in processTypes" :key="type" :value="type">{{ type }}</option>
-      </select>
-      <button class="btn btn-primary" :disabled="!selectedType" @click="createProcess">Create Process</button>
-    </div>
   </div>
 
   <div class="grid grid-cols-12 gap-6">
     <!-- Left Column: Processes (9 cols) -->
-    <div class="col-span-9">
+    <div class="col-span-8">
       <process-type-group v-for="type in processTypes" :key="type" :type="type" :hosts="hosts"
         :processes="getProcessesByType(type)"></process-type-group>
     </div>
 
     <!-- Right Column: Hosts Status (3 cols) -->
-    <div class="col-span-3">
+    <div class="col-span-4">
       <div class="sticky top-4">
         <h2 class="text-xl font-bold mb-4">Hosts Status</h2>
         <div class="badge badge-sm badge-error" v-show="hostsFetchError != null">Host fetch error</div>
-        <ul class="list bg-base-100 rounded-box shadow-md">
-          <host-status-item v-for="(host_data, host) in hosts" :host_data="host_data" :host="host"
-            :key="host"></host-status-item>
-        </ul>
+        <div class="overflow-x-auto bg-base-100 rounded-box shadow-md">
+          <table class="table table-s w-full">
+            <thead>
+              <tr>
+                <th>Host</th>
+                <th>Agent</th>
+                <th>YDB HC</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr is="vue:host-status-item" v-for="(host_data, host) in hosts" :host_data="host_data" :host="host"
+                :healthcheck="healthcheck[host]" :key="host"></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
@@ -50,8 +54,8 @@
     setup() {
       const message = ref('Nemesis Dashboard')
       const hosts = ref({})
+      const healthcheck = ref({})
       const hostsFetchError = ref(null)
-      const selectedType = ref('')
       const processTypes = ref([])
       const processes = ref({}) // { host: [ProcessInfo, ...] }
 
@@ -61,10 +65,6 @@
           .then(response => {
             hosts.value = response.data
             hostsFetchError.value = null
-            // After getting hosts, fetch processes for each
-            Object.keys(hosts.value).forEach(host => {
-              get_host_processes(host)
-            })
           })
           .catch(err => {
             hostsFetchError.value = err
@@ -86,45 +86,46 @@
         return result
       }
 
-      function get_host_processes(host) {
-        axios.get(`/api/${host}/processes`)
+      function get_all_processes() {
+        axios.get('/api/hosts/processes')
           .then(response => {
-            processes.value[host] = response.data
+            processes.value = response.data
           })
           .catch(err => {
-            console.error(`Failed to fetch processes for ${host}`, err)
-            processes.value[host] = []
+            console.error('Failed to fetch processes', err)
           })
       }
 
-      function createProcess() {
-        if (!selectedType.value) return
-
-        axios.post('/api/hosts/processes', { type: selectedType.value })
-          .then(() => {
-            // Refresh data after creation
-            setTimeout(() => {
-              Object.keys(hosts.value).forEach(host => get_host_processes(host))
-            }, 500)
+      function get_healthcheck() {
+        axios.get('/api/healthcheck')
+          .then(response => {
+            healthcheck.value = response.data
+          })
+          .catch(err => {
+            console.error('Failed to fetch healthcheck', err)
           })
       }
+
 
       // Initial load
       get_hosts_health()
       get_process_types()
+      get_all_processes()
+      get_healthcheck()
 
       // Poll every 5 seconds
       setInterval(() => {
         get_hosts_health()
-      }, 50000)
+        get_all_processes()
+        get_healthcheck()
+      }, 5000)
 
       return {
         message,
         hosts,
+        healthcheck,
         processTypes,
-        selectedType,
         processes,
-        createProcess,
         getProcessesByType
       }
     }

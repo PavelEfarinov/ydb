@@ -12,6 +12,28 @@ export default {
   setup(props) {
     const { ref } = Vue
     const isExpanded = ref(false)
+    const isEnabled = ref(false)
+
+    // Fetch initial schedule state
+    axios.get('/api/schedule')
+      .then(response => {
+        if (response.data[props.type] !== undefined) {
+          isEnabled.value = response.data[props.type]
+        }
+      })
+
+    function toggleSchedule() {
+      const newState = !isEnabled.value
+      axios.post('/api/schedule', { type: props.type, enabled: newState })
+        .then(() => {
+          isEnabled.value = newState
+        })
+        .catch(err => {
+          console.error('Failed to update schedule', err)
+          // Revert on error
+          // isEnabled.value = !newState // Not needed if we only update on success, but v-model updates immediately
+        })
+    }
 
     function getProcessesByTypeAndHost(host) {
       const hostProcs = props.processes[host] || []
@@ -21,15 +43,25 @@ export default {
 
     return {
       isExpanded,
+      isEnabled,
+      toggleSchedule,
       getProcessesByTypeAndHost
     }
   },
   template: `
     <div class="card bg-base-100 shadow-xl mb-6">
       <div class="card-body p-4">
-        <div class="flex justify-between items-center cursor-pointer" @click="isExpanded = !isExpanded">
+        <div class="flex justify-between items-center cursor-pointer">
           <div>
-            <h2 class="card-title text-xl">{{ type }}</h2>
+            <h2 class="card-title text-xl">{{ type }}
+              <input
+                type="checkbox"
+                :checked="isEnabled"
+                @click.prevent="toggleSchedule"
+                class="toggle"
+                :class="isEnabled ? 'toggle-success' : 'toggle-neutral'"
+              />
+            </h2>
             <div
               v-for="(hostData, host) in hosts"
               aria-label="status"
@@ -42,7 +74,7 @@ export default {
               }">
             </div>
           </div>
-          <button class="btn btn-ghost btn-sm">
+          <button class="btn btn-ghost btn-sm" @click="isExpanded = !isExpanded">
             {{ isExpanded ? 'Collapse' : 'Expand' }}
           </button>
         </div>

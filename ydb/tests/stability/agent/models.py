@@ -19,3 +19,8 @@ class ProcessType(BaseModel):
 
 class CreateProcessRequest(BaseModel):
     type: str
+
+
+class SetScheduleRequest(BaseModel):
+    type: str
+    enabled: bool
