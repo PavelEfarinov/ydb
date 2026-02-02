@@ -4,9 +4,8 @@ export default {
     host: String,
   },
   template: `
-    <li class="flex justify-between items-center p-2 hover:bg-base-200 rounded-box">
-      <div>
-        <div class="font-mono text-sm">{{ host }}</div>
+    <li class="list-row">
+      <div class="font-mono text-sm">{{ host }} 
         <div class="badge badge-sm" :class="{
           'badge-success': host_data.status === 'ok',
           'badge-error': host_data.status != 'ok'

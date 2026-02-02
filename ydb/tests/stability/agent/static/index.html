@@ -27,7 +27,7 @@
       <div class="sticky top-4">
         <h2 class="text-xl font-bold mb-4">Hosts Status</h2>
         <div class="badge badge-sm badge-error" v-show="hostsFetchError != null">Host fetch error</div>
-        <ul class="menu bg-base-100 w-full rounded-box shadow-xl">
+        <ul class="list bg-base-100 rounded-box shadow-md">
           <host-status-item v-for="(host_data, host) in hosts" :host_data="host_data" :host="host"
             :key="host"></host-status-item>
         </ul>

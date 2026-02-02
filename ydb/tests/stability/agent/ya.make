@@ -4,6 +4,10 @@ PY_SRCS(
     __main__.py
     install.py
     config.py
+    models.py
+    defaults.py
+    agent_app.py
+    orchestrator_app.py
 )
 
 DATA(

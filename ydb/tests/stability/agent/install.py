@@ -48,7 +48,6 @@ def install_on_hosts(hosts):
         [Service]
         Restart=always
         RestartSec=10
-        User=kikimr
         Environment=NEMESIS_USER=robot-nemesis
         Environment=NEMESIS_TYPE=agent
         Environment=STATIC_LOCATION=/Berkanavt/nemesis/static
