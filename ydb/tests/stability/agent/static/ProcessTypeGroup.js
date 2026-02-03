@@ -30,8 +30,6 @@ export default {
         })
         .catch(err => {
           console.error('Failed to update schedule', err)
-          // Revert on error
-          // isEnabled.value = !newState // Not needed if we only update on success, but v-model updates immediately
         })
     }
 

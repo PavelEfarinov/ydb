@@ -20,10 +20,6 @@ export default {
             Exit Code: {{ process_data.ret_code }}
           </div>
         </div>
-        
-        <div class="font-mono bg-base-200 p-2 rounded text-sm mb-2">
-          $ {{ process_data.command }}
-        </div>
 
         <div class="grid grid-cols-2 gap-4">
           <div>

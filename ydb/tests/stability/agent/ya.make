@@ -30,6 +30,7 @@ RESOURCE(
 
 
 PEERDIR(
+    ydb/tests/tools/nemesis/library
     ydb/tests/library
     ydb/tests/library/stability
     ydb/tests/library/wardens

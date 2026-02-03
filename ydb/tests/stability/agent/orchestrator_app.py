@@ -11,6 +11,7 @@ from ydb.tests.stability.agent.install import get_hosts_from_yaml, install_on_ho
 from ydb.tests.stability.agent.models import ProcessInfo, SetScheduleRequest, CreateHostProcessRequest
 from ydb.tests.library.stability.healthcheck.healthcheck_reporter import HealthCheckReporter
 import asyncio
+import random
 
 
 @lru_cache
@@ -40,10 +41,17 @@ async def schedule_process(process_type: str):
 
         interval = PROCESS_TYPES[process_type].get('schedule', 60)
 
-        # Execute process on all hosts simultaneously
-        tasks = [run_process_on_host(host, process_type) for host in hosts]
-        if tasks:
-            await asyncio.gather(*tasks)
+        process_def = PROCESS_TYPES[process_type]
+        if 'runner' in process_def:
+            # For nemesis types, select a random host
+            if hosts:
+                target_host = random.choice(hosts)
+                await run_process_on_host(target_host, process_type)
+        else:
+            # Execute process on all hosts simultaneously
+            tasks = [run_process_on_host(host, process_type) for host in hosts]
+            if tasks:
+                await asyncio.gather(*tasks)
 
         await asyncio.sleep(interval)
 
@@ -62,7 +70,7 @@ async def lifespan(app: FastAPI):
     healthcheck_reporter.start_healthchecks()
 
     yield
-    
+
     if healthcheck_reporter:
         healthcheck_reporter.stop_healthchecks()
 
@@ -141,7 +149,7 @@ async def get_hosts_health():
 async def set_schedule(req: SetScheduleRequest):
     if req.type not in PROCESS_TYPES:
         return {"status": "error", "message": "Invalid process type"}
-    
+
     if req.enabled:
         if req.type in scheduled_tasks and scheduled_tasks[req.type]['enabled']:
             return {"status": "ok", "message": "Already enabled"}
@@ -155,7 +163,7 @@ async def set_schedule(req: SetScheduleRequest):
             if 'task' in scheduled_tasks[req.type]:
                 scheduled_tasks[req.type]['task'].cancel()
             del scheduled_tasks[req.type]
-            
+
     return {"status": "ok"}
 
 

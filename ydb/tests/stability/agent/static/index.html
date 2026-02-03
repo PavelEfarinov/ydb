@@ -8,6 +8,12 @@
     <h1 class="text-2xl font-bold">{{ message }}</h1>
   </div>
 
+  <div class="toast toast-top toast-end z-50">
+    <div v-for="error in errors" :key="error.id" class="alert alert-error">
+      <span>{{ error.message }}</span>
+    </div>
+  </div>
+
   <div class="grid grid-cols-12 gap-6">
     <!-- Left Column: Processes (9 cols) -->
     <div class="col-span-8">
@@ -58,6 +64,26 @@
       const hostsFetchError = ref(null)
       const processTypes = ref([])
       const processes = ref({}) // { host: [ProcessInfo, ...] }
+      const errors = ref([])
+
+      // Axios interceptor for global error handling
+      axios.interceptors.response.use(
+        response => response,
+        error => {
+          const endpoint = error.config.url
+          const status = error.response ? error.response.status : 'Network Error'
+          const message = `Error at ${endpoint}: ${status}`
+          
+          const errorObj = { id: Date.now(), message }
+          errors.value.push(errorObj)
+          
+          setTimeout(() => {
+            errors.value = errors.value.filter(e => e.id !== errorObj.id)
+          }, 5000)
+          
+          return Promise.reject(error)
+        }
+      )
 
       function get_hosts_health() {
         return axios
@@ -126,6 +152,7 @@
         healthcheck,
         processTypes,
         processes,
+        errors,
         getProcessesByType
       }
     }

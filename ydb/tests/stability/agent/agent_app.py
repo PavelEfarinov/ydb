@@ -1,4 +1,7 @@
 import asyncio
+import logging
+import io
+import threading
 from typing import List
 
 from fastapi import FastAPI
@@ -10,12 +13,11 @@ class ProcessManager:
     def __init__(self):
         self.processes = []
 
-    async def start_process(self, type_name: str, command: str):
+    async def start_process(self, type_name: str, command_or_runner):
         proc_id = len(self.processes)
         proc_data = {
             "id": proc_id,
             "type": type_name,
-            "command": command,
             "stdout": "",
             "stderr": "",
             "ret_code": None,
@@ -23,32 +25,63 @@ class ProcessManager:
         }
         self.processes.append(proc_data)
 
-        asyncio.create_task(self._run(proc_id, command))
+        asyncio.create_task(self._run(proc_id, command_or_runner))
         return proc_data
 
-    async def _run(self, proc_id, command):
+    async def _run(self, proc_id, command_or_runner):
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            # It's a nemesis runner
+            log_capture_string = io.StringIO()
 
-            async def read_stream(stream, key):
-                while True:
-                    line = await stream.readline()
-                    if not line:
-                        break
-                    self.processes[proc_id][key] += line.decode()
+            # Custom handler that filters logs based on thread ID
+            class ThreadLocalHandler(logging.StreamHandler):
+                def __init__(self, stream, thread_id):
+                    super().__init__(stream)
+                    self.thread_id = thread_id
 
-            await asyncio.gather(
-                read_stream(process.stdout, 'stdout'),
-                read_stream(process.stderr, 'stderr')
-            )
+                def filter(self, record):
+                    return record.thread == self.thread_id
 
-            ret_code = await process.wait()
-            self.processes[proc_id]['ret_code'] = ret_code
-            self.processes[proc_id]['status'] = 'finished' if ret_code == 0 else 'failed'
+            # We need to know the thread ID where inject_fault will run
+            # Since run_in_executor runs in a thread pool, we can't know the ID beforehand easily
+            # But we can wrap the execution to set up logging inside the thread
+
+            def execute_with_logging():
+                thread_id = threading.get_ident()
+                handler = ThreadLocalHandler(log_capture_string, thread_id)
+                handler.setLevel(logging.INFO)
+
+                # Configure root logger to ensure it processes INFO logs
+                root_logger = logging.getLogger()
+                original_level = root_logger.level
+                root_logger.setLevel(logging.INFO)
+
+                root_logger.addHandler(handler)
+                try:
+                    command_or_runner.inject_fault()
+                finally:
+                    root_logger.removeHandler(handler)
+                    root_logger.setLevel(original_level)
+
+            # Background task to flush logs
+            async def flush_logs():
+                while self.processes[proc_id]['status'] == 'running':
+                    self.processes[proc_id]['stdout'] = log_capture_string.getvalue()
+                    await asyncio.sleep(1)
+                # Final flush
+                self.processes[proc_id]['stdout'] = log_capture_string.getvalue()
+
+            loop = asyncio.get_running_loop()
+            flush_task = asyncio.create_task(flush_logs())
+
+            await loop.run_in_executor(None, execute_with_logging)
+
+            self.processes[proc_id]['status'] = 'finished'
+            self.processes[proc_id]['ret_code'] = 0
+
+            await flush_task
+            log_capture_string.close()
+
         except Exception as e:
             self.processes[proc_id]['stderr'] += f"\nError executing process: {str(e)}"
             self.processes[proc_id]['status'] = 'error'
@@ -81,6 +114,8 @@ async def create_process(req: CreateProcessRequest):
     if req.type not in PROCESS_TYPES:
         return {"status": "error", "message": "Invalid process type"}
 
-    command = PROCESS_TYPES[req.type]
-    await manager.start_process(req.type, command['cmd'])
+    process_def = PROCESS_TYPES[req.type]
+    command_or_runner = process_def['runner']
+
+    await manager.start_process(req.type, command_or_runner)
     return {"status": "started"}
