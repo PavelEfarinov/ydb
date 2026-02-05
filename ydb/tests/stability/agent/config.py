@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "Awesome API"
+    app_name: str = "Nemesis App"
     nemesis_type: str = 'master'  # or 'agent'
     static_location: str = 'static'
     app_host: str = '::'

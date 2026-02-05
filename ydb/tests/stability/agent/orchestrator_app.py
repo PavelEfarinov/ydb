@@ -11,7 +11,8 @@ from ydb.tests.stability.agent.install import get_hosts_from_yaml, install_on_ho
 from ydb.tests.stability.agent.models import ProcessInfo, SetScheduleRequest, CreateHostProcessRequest
 from ydb.tests.library.stability.healthcheck.healthcheck_reporter import HealthCheckReporter
 import asyncio
-import random
+import json
+import os
 
 
 @lru_cache
@@ -24,12 +25,27 @@ def get_settings():
 hosts = []
 scheduled_tasks = {}
 healthcheck_reporter = None
+nemesis_config = {}
 
 
-async def run_process_on_host(host, process_type):
+def load_nemesis_config():
+    global nemesis_config
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nemesis_config.json')
+    try:
+        with open(config_path, 'r') as f:
+            nemesis_config = json.load(f)
+    except FileNotFoundError:
+        print(f"Config file not found at {config_path}, using defaults")
+        nemesis_config = {}
+    except Exception as e:
+        print(f"Failed to load config: {e}")
+        nemesis_config = {}
+
+
+async def run_process_on_host(host, process_type, action='run'):
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, lambda: requests.post(f"http://{host}:31434/api/processes", json={'type': process_type}, timeout=5))
+        await loop.run_in_executor(None, lambda: requests.post(f"http://{host}:31434/api/processes", json={'type': process_type, 'action': action}, timeout=5))
     except Exception as e:
         print(f"Failed to start process {process_type} on {host}: {e}")
 
@@ -39,19 +55,23 @@ async def schedule_process(process_type: str):
         if process_type not in scheduled_tasks or not scheduled_tasks[process_type]['enabled']:
             break
 
-        interval = PROCESS_TYPES[process_type].get('schedule', 60)
-
+        # Get config for this process type
+        p_config = nemesis_config.get(process_type, {})
         process_def = PROCESS_TYPES[process_type]
+        interval = p_config.get('schedule', process_def.get('schedule', 60))
+
         if 'runner' in process_def:
-            # For nemesis types, select a random host
-            if hosts:
-                target_host = random.choice(hosts)
-                await run_process_on_host(target_host, process_type)
-        else:
-            # Execute process on all hosts simultaneously
-            tasks = [run_process_on_host(host, process_type) for host in hosts]
-            if tasks:
-                await asyncio.gather(*tasks)
+            runner = process_def['runner']
+            # Delegate logic to the runner
+            action, target_hosts = runner.prepare_fault(hosts, p_config)
+
+            if action and target_hosts:
+                tasks = []
+                for host in target_hosts:
+                    tasks.append(run_process_on_host(host, process_type, action=action))
+
+                if tasks:
+                    await asyncio.gather(*tasks)
 
         await asyncio.sleep(interval)
 
@@ -64,6 +84,9 @@ async def lifespan(app: FastAPI):
         hosts = get_hosts_from_yaml(get_settings().yaml_config_location)
         print(hosts)
         install_on_hosts(hosts)
+
+    # Load config
+    load_nemesis_config()
 
     # Start healthcheck reporter
     healthcheck_reporter = HealthCheckReporter(hosts, store_results=True)
@@ -122,7 +145,8 @@ async def create_host_process(req: CreateHostProcessRequest):
 
     try:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, lambda: requests.post(f"http://{req.host}:31434/api/processes", json={'type': req.type}, timeout=5))
+        action = req.action if req.action else 'inject'
+        await loop.run_in_executor(None, lambda: requests.post(f"http://{req.host}:31434/api/processes", json={'type': req.type, 'action': action}, timeout=5))
         return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -177,3 +201,9 @@ async def get_healthcheck():
     if healthcheck_reporter:
         return healthcheck_reporter.last_results
     return {}
+
+
+@app.post("/api/config/reload", response_model=Dict[str, Any])
+async def reload_config():
+    load_nemesis_config()
+    return {"status": "ok", "config": nemesis_config}

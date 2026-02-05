@@ -13,11 +13,12 @@ class ProcessManager:
     def __init__(self):
         self.processes = []
 
-    async def start_process(self, type_name: str, command_or_runner):
+    async def start_process(self, type_name: str, runner, action='inject'):
         proc_id = len(self.processes)
         proc_data = {
             "id": proc_id,
             "type": type_name,
+            "command": f"{type_name} ({action})",
             "stdout": "",
             "stderr": "",
             "ret_code": None,
@@ -25,10 +26,10 @@ class ProcessManager:
         }
         self.processes.append(proc_data)
 
-        asyncio.create_task(self._run(proc_id, command_or_runner))
+        asyncio.create_task(self._run(proc_id, runner, action))
         return proc_data
 
-    async def _run(self, proc_id, command_or_runner):
+    async def _run(self, proc_id, runner, action):
         try:
             # It's a nemesis runner
             log_capture_string = io.StringIO()
@@ -58,7 +59,12 @@ class ProcessManager:
 
                 root_logger.addHandler(handler)
                 try:
-                    command_or_runner.inject_fault()
+                    if action == 'inject':
+                        runner.inject_fault()
+                    elif action == 'extract':
+                        runner.extract_fault()
+                    else:
+                        raise Exception('Unknown action type')
                 finally:
                     root_logger.removeHandler(handler)
                     root_logger.setLevel(original_level)
@@ -115,7 +121,9 @@ async def create_process(req: CreateProcessRequest):
         return {"status": "error", "message": "Invalid process type"}
 
     process_def = PROCESS_TYPES[req.type]
-    command_or_runner = process_def['runner']
+    runner = process_def['runner']
 
-    await manager.start_process(req.type, command_or_runner)
+    action = getattr(req, 'action', 'inject')
+
+    await manager.start_process(req.type, runner, action)
     return {"status": "started"}

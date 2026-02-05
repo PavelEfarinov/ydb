@@ -1,7 +1,7 @@
 import signal
 import logging
 import abc
-import six
+import random
 
 import subprocess
 import time
@@ -9,7 +9,6 @@ from ydb.tests.tools.nemesis.library import base
 from ydb.tests.library.nemesis.network.client import NetworkClient
 
 
-@six.add_metaclass(abc.ABCMeta)
 class AbstractAgentNemesis(base.AbstractMonitoredNemesis):
     def __init__(self):
         base.AbstractMonitoredNemesis.__init__(self, scope='node')
@@ -27,23 +26,52 @@ class AbstractAgentNemesis(base.AbstractMonitoredNemesis):
         self.on_success_inject_fault()
         self.__logger.info("=== INJECT_FAULT SUCCESS: %s ===", str(self))
 
-    @abc.abstractmethod
-    def run(self):
-        pass
+    def prepare_fault(self, hosts, config):
+        """
+        Determines the action (inject/extract) and target hosts for the next execution.
+        Returns a tuple: (action, target_hosts)
+        """
+        if hosts:
+            return 'inject', [random.choice(hosts)]
+        return None, []
 
 
 class NetworkNemesis(AbstractAgentNemesis):
     def __init__(self):
         super(NetworkNemesis, self).__init__()
         self.__logger = logging.getLogger(self.__class__.__name__)
+        self.affected_hosts = set()
 
-    def run(self):
-        with NetworkClient('localhost', port=19001, ssh_username=None) as client:
-            self.__logger.info("Isolating node...")
-            client.isolate_node()
-            time.sleep(60)
-            self.__logger.info("Restoring node...")
-            # Context manager handles cleanup (clear_all_drops)
+    def prepare_fault(self, hosts, config):
+        max_affected = config.get('max_affected_nodes', 4)
+
+        if len(self.affected_hosts) >= max_affected:
+            # Rollback all
+            targets = list(self.affected_hosts)
+            self.affected_hosts.clear()
+            return 'extract', targets
+        else:
+            # Inject fault on a new random host
+            available_hosts = [h for h in hosts if h not in self.affected_hosts]
+            if available_hosts:
+                target_host = random.choice(available_hosts)
+                self.affected_hosts.add(target_host)
+                return 'inject', [target_host]
+            return None, []
+
+    def inject_fault(self):
+        self.__logger.info("=== INJECT_FAULT START: %s ===", str(self))
+        client = NetworkClient('localhost', port=19001, ssh_username=None)
+        self.__logger.info("Isolating node...")
+        client.isolate_node()
+        self.on_success_inject_fault()
+        self.__logger.info("=== INJECT_FAULT SUCCESS: %s ===", str(self))
+
+    def extract_fault(self):
+        self.__logger.info("Extracting fault")
+        client = NetworkClient('localhost', port=19001, ssh_username=None)
+        self.__logger.info("Restoring node...")
+        client.clear_all_drops()
 
 
 class KillNodeNemesis(AbstractAgentNemesis):
@@ -51,7 +79,7 @@ class KillNodeNemesis(AbstractAgentNemesis):
         super(KillNodeNemesis, self).__init__()
         self.__logger = logging.getLogger(self.__class__.__name__)
 
-    def run(self):
+    def inject_fault(self):
         cmd = "ps aux | grep '\\--ic-port' | grep -v grep | awk '{ print $2 }' | tail -n 1 | xargs -r sudo kill -%d" % (
             int(signal.SIGKILL),
         )
@@ -65,7 +93,7 @@ class ShellNemesis(AbstractAgentNemesis):
         self.__logger = logging.getLogger(self.__class__.__name__)
         self.cmd = cmd
 
-    def run(self):
+    def inject_fault(self):
         self.__logger.info(f"Executing: {self.cmd}")
         subprocess.check_call(self.cmd, shell=True)
 
@@ -75,7 +103,7 @@ class TestLongNemesis(AbstractAgentNemesis):
         super(TestLongNemesis, self).__init__()
         self.__logger = logging.getLogger(self.__class__.__name__)
 
-    def run(self):
+    def inject_fault(self):
         for i in range(150):
             self.__logger.info(f"Iteration: {i}")
             time.sleep(1)
@@ -86,7 +114,7 @@ class ThrowingNemesis(AbstractAgentNemesis):
         super(ThrowingNemesis, self).__init__()
         self.__logger = logging.getLogger(self.__class__.__name__)
 
-    def run(self):
+    def inject_fault(self):
         raise Exception('some custom exception')
 
 

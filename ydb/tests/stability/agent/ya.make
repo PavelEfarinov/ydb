@@ -15,19 +15,9 @@ DATA(
 )
 
 DEPENDS(
-    ydb/apps/ydb
     ydb/tools/cfg/bin
     ydb/tests/tools/nemesis/driver
 )
-
-BUNDLE(
-    ydb/apps/ydb NAME ydb_cli
-)
-
-RESOURCE(
-    ydb_cli ydb_cli
-)
-
 
 PEERDIR(
     ydb/tests/tools/nemesis/library

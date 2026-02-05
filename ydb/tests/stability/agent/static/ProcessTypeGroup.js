@@ -71,16 +71,17 @@ export default {
                 :class="isEnabled ? 'toggle-success' : 'toggle-neutral'"
               />
             </h2>
-            <div
-              v-for="(hostData, host) in hosts"
-              aria-label="status"
-              class='status p-1 m-1'
-              :class="{
-              'status-success animate-bounce':(processes[host] ?? []).length > 0 && processes[host].at(-1).status === 'running',
-              'status-success':(processes[host] ?? []).length > 0 && processes[host].at(-1).status === 'finished',
-              '':(processes[host] ?? []).length == 0,
-              'status-error':(processes[host] ?? []).length > 0 && ['failed', 'error'].includes(processes[host].at(-1).status),
-              }">
+            <div class="tooltip tooltip-right" :data-tip="host" v-for="(hostData, host) in hosts">
+              <div
+                aria-label="status"
+                class='status p-1 m-1'
+                :class="{
+                'status-success animate-bounce':(processes[host] ?? []).length > 0 && processes[host].at(-1).status === 'running',
+                'status-success':(processes[host] ?? []).length > 0 && processes[host].at(-1).status === 'finished',
+                '':(processes[host] ?? []).length == 0,
+                'status-error':(processes[host] ?? []).length > 0 && ['failed', 'error'].includes(processes[host].at(-1).status),
+                }">
+              </div>
             </div>
           </div>
           <button class="btn btn-ghost btn-sm" @click="isExpanded = !isExpanded">

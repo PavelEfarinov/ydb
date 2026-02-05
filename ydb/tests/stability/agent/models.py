@@ -19,6 +19,7 @@ class ProcessType(BaseModel):
 
 class CreateProcessRequest(BaseModel):
     type: str
+    action: Optional[str] = 'inject'
 
 
 class SetScheduleRequest(BaseModel):
@@ -29,3 +30,4 @@ class SetScheduleRequest(BaseModel):
 class CreateHostProcessRequest(BaseModel):
     host: str
     type: str
+    action: Optional[str] = 'inject'
