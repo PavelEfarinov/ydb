@@ -6,6 +6,7 @@ export default {
   },
   props: {
     type: String,
+    description: String,
     hosts: Object, // { hostName: hostData }
     processes: Object // { hostName: [ProcessInfo] }
   },
@@ -13,6 +14,7 @@ export default {
     const { ref } = Vue
     const isExpanded = ref(false)
     const isEnabled = ref(false)
+    const isDescriptionExpanded = ref(false)
 
     // Fetch initial schedule state
     axios.get('/api/schedule')
@@ -52,6 +54,7 @@ export default {
     return {
       isExpanded,
       isEnabled,
+      isDescriptionExpanded,
       toggleSchedule,
       runProcess,
       getProcessesByTypeAndHost
@@ -61,8 +64,9 @@ export default {
     <div class="card bg-base-100 shadow-xl mb-6">
       <div class="card-body p-4">
         <div class="flex justify-between items-center cursor-pointer">
-          <div>
-            <h2 class="card-title text-xl">{{ type }}
+          <div class="flex-1">
+            <div class="flex items-center gap-2">
+              <h2 class="card-title text-xl">{{ type }}</h2>
               <input
                 type="checkbox"
                 :checked="isEnabled"
@@ -70,8 +74,21 @@ export default {
                 class="toggle"
                 :class="isEnabled ? 'toggle-success' : 'toggle-neutral'"
               />
-            </h2>
-            <div class="tooltip tooltip-right" :data-tip="host" v-for="(hostData, host) in hosts">
+              <button
+                v-if="description"
+                @click="isDescriptionExpanded = !isDescriptionExpanded"
+                class="btn btn-ghost btn-xs"
+              >
+                {{ isDescriptionExpanded ? '📖 Hide Info' : '📖 Info' }}
+              </button>
+            </div>
+            <div v-if="description && isDescriptionExpanded" class="collapse collapse-open mt-2">
+              <div class="collapse-content bg-base-200 rounded-box p-3">
+                <p class="text-sm text-base-content/80 whitespace-pre-line">{{ description }}</p>
+              </div>
+            </div>
+            <div class="flex items-center mt-2">
+              <div class="tooltip tooltip-right" :data-tip="host" v-for="(hostData, host) in hosts">
               <div
                 aria-label="status"
                 class='status p-1 m-1'
@@ -81,6 +98,7 @@ export default {
                 '':(processes[host] ?? []).length == 0,
                 'status-error':(processes[host] ?? []).length > 0 && ['failed', 'error'].includes(processes[host].at(-1).status),
                 }">
+              </div>
               </div>
             </div>
           </div>
@@ -95,6 +113,7 @@ export default {
             :key="host"
             :host="host"
             :processes="getProcessesByTypeAndHost(host)"
+            :is-scheduled="isEnabled"
             @run-process="runProcess"
           ></host-process-item>
         </div>

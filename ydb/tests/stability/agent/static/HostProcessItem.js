@@ -1,7 +1,8 @@
 export default {
   props: {
     host: String,
-    processes: Array
+    processes: Array,
+    isScheduled: Boolean
   },
   setup(props) {
     const { computed } = Vue
@@ -28,7 +29,16 @@ export default {
       <div class="collapse-title font-medium flex justify-between items-center pr-12">
         <div class="flex items-center gap-2">
           <span class="font-mono font-bold">{{ host }}</span>
-          <button class="btn btn-xs btn-primary z-10" @click.stop="$emit('run-process', host)">Run</button>
+          <div class="tooltip" :data-tip="isScheduled ? 'Disable scheduling to run manually' : 'Run nemesis on this host'">
+            <button
+              class="btn btn-xs z-10"
+              :class="isScheduled ? 'btn-disabled' : 'btn-primary'"
+              :disabled="isScheduled"
+              @click.stop="$emit('run-process', host)"
+            >
+              Run
+            </button>
+          </div>
         </div>
         
         <div v-if="latestProcess" class="flex items-center gap-4">

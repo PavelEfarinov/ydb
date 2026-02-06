@@ -17,8 +17,8 @@
   <div class="grid grid-cols-12 gap-6">
     <!-- Left Column: Processes (9 cols) -->
     <div class="col-span-8">
-      <process-type-group v-for="type in processTypes" :key="type" :type="type" :hosts="hosts"
-        :processes="getProcessesByType(type)"></process-type-group>
+      <process-type-group v-for="typeObj in processTypes" :key="typeObj.name" :type="typeObj.name" :description="typeObj.description" :hosts="hosts"
+        :processes="getProcessesByType(typeObj.name)"></process-type-group>
     </div>
 
     <!-- Right Column: Hosts Status (3 cols) -->
@@ -62,7 +62,7 @@
       const hosts = ref({})
       const healthcheck = ref({})
       const hostsFetchError = ref(null)
-      const processTypes = ref([])
+      const processTypes = ref([]) // Array of {name, description}
       const processes = ref({}) // { host: [ProcessInfo, ...] }
       const errors = ref([])
 
@@ -150,6 +150,7 @@
         message,
         hosts,
         healthcheck,
+        hostsFetchError,
         processTypes,
         processes,
         errors,

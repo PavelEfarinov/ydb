@@ -7,7 +7,10 @@ PY_SRCS(
     models.py
     defaults.py
     agent_app.py
+    agent_router.py
     orchestrator_app.py
+    orchestrator_router.py
+    app.py
 )
 
 DATA(
