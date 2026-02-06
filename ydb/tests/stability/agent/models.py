@@ -25,6 +25,7 @@ class CreateProcessRequest(BaseModel):
 class SetScheduleRequest(BaseModel):
     type: str
     enabled: bool
+    interval: Optional[int] = None  # Custom interval in seconds
 
 
 class CreateHostProcessRequest(BaseModel):

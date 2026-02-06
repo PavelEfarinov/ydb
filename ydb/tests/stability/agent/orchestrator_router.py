@@ -13,6 +13,7 @@ router = APIRouter()
 # Module-level state
 hosts = []
 scheduled_tasks = {}
+scheduled_executions_history = []  # List of {type, action, host, timestamp}
 
 
 def is_local_host(host: str) -> bool:
@@ -38,7 +39,7 @@ def is_local_host(host: str) -> bool:
         return False
 
 
-async def run_process_on_host(host, process_type, action='run'):
+async def run_process_on_host(host, process_type, action='run', track_history=False):
     """Run process on host, using direct call if it's the local host to avoid deadlock"""
     try:
         # Check if this is a call to ourselves
@@ -54,11 +55,25 @@ async def run_process_on_host(host, process_type, action='run'):
             # Remote call via HTTP
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: requests.post(f"http://{host}:31434/api/processes", json={'type': process_type, 'action': action}, timeout=5))
+        
+        # Track in history if requested (for scheduled executions)
+        if track_history:
+            from datetime import datetime
+            scheduled_executions_history.append({
+                "type": process_type,
+                "action": action,
+                "host": host,
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            })
+            # Keep only last 50 entries
+            if len(scheduled_executions_history) > 50:
+                scheduled_executions_history.pop(0)
+                
     except Exception as e:
         print(f"Failed to start process {process_type} on {host}: {e}")
 
 
-async def schedule_process(process_type: str, nemesis_config: dict):
+async def schedule_process(process_type: str, nemesis_config: dict, custom_interval: int = None):
     while True:
         if process_type not in scheduled_tasks or not scheduled_tasks[process_type]['enabled']:
             break
@@ -66,7 +81,9 @@ async def schedule_process(process_type: str, nemesis_config: dict):
         # Get config for this process type
         p_config = nemesis_config.get(process_type, {})
         process_def = PROCESS_TYPES[process_type]
-        interval = p_config.get('schedule', process_def.get('schedule', 60))
+        
+        # Use custom interval if provided, otherwise fall back to config
+        interval = custom_interval if custom_interval is not None else p_config.get('schedule', process_def.get('schedule', 60))
 
         if 'runner' in process_def:
             runner = process_def['runner']
@@ -76,7 +93,7 @@ async def schedule_process(process_type: str, nemesis_config: dict):
             if action and target_hosts:
                 tasks = []
                 for host in target_hosts:
-                    tasks.append(run_process_on_host(host, process_type, action=action))
+                    tasks.append(run_process_on_host(host, process_type, action=action, track_history=True))
 
                 if tasks:
                     await asyncio.gather(*tasks)
@@ -188,8 +205,11 @@ async def set_schedule(req: SetScheduleRequest):
         if req.type in scheduled_tasks and scheduled_tasks[req.type]['enabled']:
             return {"status": "ok", "message": "Already enabled"}
 
-        scheduled_tasks[req.type] = {'enabled': True}
-        task = asyncio.create_task(schedule_process(req.type, nemesis_config))
+        scheduled_tasks[req.type] = {
+            'enabled': True,
+            'interval': req.interval
+        }
+        task = asyncio.create_task(schedule_process(req.type, nemesis_config, req.interval))
         scheduled_tasks[req.type]['task'] = task
     else:
         if req.type in scheduled_tasks:
@@ -201,9 +221,26 @@ async def set_schedule(req: SetScheduleRequest):
     return {"status": "ok"}
 
 
-@router.get("/api/schedule", response_model=Dict[str, bool])
+@router.get("/api/schedule")
 async def get_schedule():
-    return {pt: (pt in scheduled_tasks and scheduled_tasks[pt]['enabled']) for pt in PROCESS_TYPES}
+    """Return schedule status with intervals"""
+    result = {}
+    for pt in PROCESS_TYPES:
+        if pt in scheduled_tasks and scheduled_tasks[pt]['enabled']:
+            result[pt] = {
+                "enabled": True,
+                "interval": scheduled_tasks[pt].get('interval')
+            }
+        else:
+            result[pt] = {"enabled": False, "interval": None}
+    return result
+
+
+@router.get("/api/schedule/history")
+async def get_schedule_history():
+    """Return last scheduled executions"""
+    # Return last 5 in reverse order (newest first)
+    return scheduled_executions_history[-15:][::-1]
 
 
 @router.get("/api/healthcheck", response_model=Dict[str, Any])

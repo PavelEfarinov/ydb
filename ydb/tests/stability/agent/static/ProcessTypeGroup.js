@@ -11,22 +11,49 @@ export default {
     processes: Object // { hostName: [ProcessInfo] }
   },
   setup(props) {
-    const { ref } = Vue
+    const { ref, computed } = Vue
     const isExpanded = ref(false)
     const isEnabled = ref(false)
     const isDescriptionExpanded = ref(false)
+    const customInterval = ref(null)
+    
+    // Get default interval from PROCESS_TYPES
+    const defaultInterval = computed(() => {
+      // This will be fetched from backend via process_types endpoint
+      return 60 // fallback
+    })
 
     // Fetch initial schedule state
     axios.get('/api/schedule')
       .then(response => {
-        if (response.data[props.type] !== undefined) {
-          isEnabled.value = response.data[props.type]
+        const scheduleData = response.data[props.type]
+        if (scheduleData !== undefined) {
+          isEnabled.value = scheduleData.enabled || false
+          if (scheduleData.interval !== null && scheduleData.interval !== undefined) {
+            customInterval.value = scheduleData.interval
+          }
+        }
+      })
+    
+    // Fetch default interval from process types
+    axios.get('/api/process_types')
+      .then(response => {
+        const processType = response.data.find(pt => pt.name === props.type)
+        if (processType && !customInterval.value) {
+          // Set default from config if not already set
+          customInterval.value = processType.schedule || 60
         }
       })
 
     function toggleSchedule() {
       const newState = !isEnabled.value
-      axios.post('/api/schedule', { type: props.type, enabled: newState })
+      const interval = customInterval.value ? parseInt(customInterval.value) : null
+      
+      axios.post('/api/schedule', {
+        type: props.type,
+        enabled: newState,
+        interval: interval
+      })
         .then(() => {
           isEnabled.value = newState
         })
@@ -55,6 +82,8 @@ export default {
       isExpanded,
       isEnabled,
       isDescriptionExpanded,
+      customInterval,
+      defaultInterval,
       toggleSchedule,
       runProcess,
       getProcessesByTypeAndHost
@@ -65,8 +94,21 @@ export default {
       <div class="card-body p-4">
         <div class="flex justify-between items-center cursor-pointer">
           <div class="flex-1">
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-3">
               <h2 class="card-title text-xl">{{ type }}</h2>
+              
+              <div class="flex items-center gap-2">
+                <label class="text-sm">Interval (sec):</label>
+                <input
+                  type="number"
+                  v-model="customInterval"
+                  :disabled="isEnabled"
+                  class="input input-bordered input-sm w-20"
+                  min="1"
+                  placeholder="60"
+                />
+              </div>
+              
               <input
                 type="checkbox"
                 :checked="isEnabled"
@@ -74,6 +116,7 @@ export default {
                 class="toggle"
                 :class="isEnabled ? 'toggle-success' : 'toggle-neutral'"
               />
+              
               <button
                 v-if="description"
                 @click="isDescriptionExpanded = !isDescriptionExpanded"

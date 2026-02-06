@@ -21,25 +21,60 @@
         :processes="getProcessesByType(typeObj.name)"></process-type-group>
     </div>
 
-    <!-- Right Column: Hosts Status (3 cols) -->
+    <!-- Right Column: Hosts Status & Schedule History (3 cols) -->
     <div class="col-span-4">
-      <div class="sticky top-4">
-        <h2 class="text-xl font-bold mb-4">Hosts Status</h2>
-        <div class="badge badge-sm badge-error" v-show="hostsFetchError != null">Host fetch error</div>
-        <div class="overflow-x-auto bg-base-100 rounded-box shadow-md">
-          <table class="table table-s w-full">
-            <thead>
-              <tr>
-                <th>Host</th>
-                <th>Agent</th>
-                <th>YDB HC</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr is="vue:host-status-item" v-for="(host_data, host) in hosts" :host_data="host_data" :host="host"
-                :healthcheck="healthcheck[host]" :key="host"></tr>
-            </tbody>
-          </table>
+      <div class="sticky top-4 space-y-6">
+        <!-- Hosts Status -->
+        <div>
+          <h2 class="text-xl font-bold mb-4">Hosts Status</h2>
+          <div class="badge badge-sm badge-error" v-show="hostsFetchError != null">Host fetch error</div>
+          <div class="overflow-x-auto bg-base-100 rounded-box shadow-md">
+            <table class="table table-xs w-full">
+              <thead>
+                <tr>
+                  <th>Host</th>
+                  <th>Agent</th>
+                  <th>YDB HC</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr is="vue:host-status-item" v-for="(host_data, host) in hosts" :host_data="host_data" :host="host"
+                  :healthcheck="healthcheck[host]" :key="host"></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Schedule History -->
+        <div>
+          <h2 class="text-xl font-bold mb-4">Recent Scheduled Runs</h2>
+          <div class="overflow-x-auto bg-base-100 rounded-box shadow-md">
+            <table class="table table-xs w-full">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Action</th>
+                  <th>Host</th>
+                  <th>Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(entry, index) in scheduleHistory" :key="index">
+                  <td class="font-mono text-xs">{{ entry.type }}</td>
+                  <td>
+                    <span class="badge badge-xs" :class="entry.action === 'inject' ? 'badge-warning' : 'badge-info'">
+                      {{ entry.action }}
+                    </span>
+                  </td>
+                  <td class="font-mono text-xs">{{ entry.host }}</td>
+                  <td class="text-xs opacity-70">{{ new Date(entry.timestamp).toLocaleTimeString() }}</td>
+                </tr>
+                <tr v-if="scheduleHistory.length === 0">
+                  <td colspan="4" class="text-center opacity-50">No scheduled runs yet</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -65,6 +100,7 @@
       const processTypes = ref([]) // Array of {name, description}
       const processes = ref({}) // { host: [ProcessInfo, ...] }
       const errors = ref([])
+      const scheduleHistory = ref([]) // Array of scheduled execution history
 
       // Axios interceptor for global error handling
       axios.interceptors.response.use(
@@ -132,18 +168,30 @@
           })
       }
 
+      function get_schedule_history() {
+        axios.get('/api/schedule/history')
+          .then(response => {
+            scheduleHistory.value = response.data
+          })
+          .catch(err => {
+            console.error('Failed to fetch schedule history', err)
+          })
+      }
+
 
       // Initial load
       get_hosts_health()
       get_process_types()
       get_all_processes()
       get_healthcheck()
+      get_schedule_history()
 
       // Poll every 5 seconds
       setInterval(() => {
         get_hosts_health()
         get_all_processes()
         get_healthcheck()
+        get_schedule_history()
       }, 5000)
 
       return {
@@ -154,6 +202,7 @@
         processTypes,
         processes,
         errors,
+        scheduleHistory,
         getProcessesByType
       }
     }
