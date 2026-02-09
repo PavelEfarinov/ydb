@@ -24,12 +24,11 @@ export default {
   },
   emits: ['run-process'],
   template: `
-    <div class="collapse collapse-arrow bg-base-200 mb-2">
-      <input type="checkbox" />
-      <div class="collapse-title font-medium flex justify-between items-center pr-12">
+    <details class="collapse collapse-arrow bg-base-200 mb-2">
+      <summary class="collapse-title font-medium flex justify-between items-center pr-12">
         <div class="flex items-center gap-2">
           <span class="font-mono font-bold">{{ host }}</span>
-          <div class="tooltip" :data-tip="isScheduled ? 'Disable scheduling to run manually' : 'Run nemesis on this host'">
+          <div class="tooltip tooltip-right" :data-tip="isScheduled ? 'Disable scheduling to run manually' : 'Run nemesis on this host'">
             <button
               class="btn btn-xs z-10"
               :class="isScheduled ? 'btn-disabled' : 'btn-primary'"
@@ -55,7 +54,7 @@ export default {
         <div v-else class="text-sm opacity-50">
           No runs
         </div>
-      </div>
+      </summary>
       
       <div class="collapse-content">
         <div v-if="latestProcess" class="pt-4">
@@ -114,6 +113,6 @@ export default {
           No process history for this type on {{ host }}
         </div>
       </div>
-    </div>
+    </details>
   `
 }

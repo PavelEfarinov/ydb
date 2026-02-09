@@ -12,7 +12,6 @@ export default {
   },
   setup(props) {
     const { ref, computed } = Vue
-    const isExpanded = ref(false)
     const isEnabled = ref(false)
     const isDescriptionExpanded = ref(false)
     const customInterval = ref(null)
@@ -79,7 +78,6 @@ export default {
     }
 
     return {
-      isExpanded,
       isEnabled,
       isDescriptionExpanded,
       customInterval,
@@ -90,12 +88,12 @@ export default {
     }
   },
   template: `
-    <div class="card bg-base-100 shadow-xl mb-6">
-      <div class="card-body p-4">
-        <div class="flex justify-between items-center cursor-pointer">
+    <details class="collapse collapse-arrow bg-base-100 shadow-xl mb-6">
+      <summary class="collapse-title font-medium p-4">
+        <div class="flex justify-between items-center pr-12">
           <div class="flex-1">
             <div class="flex items-center gap-3">
-              <h2 class="card-title text-xl">{{ type }}</h2>
+              <h2 class="text-xl font-bold">{{ type }}</h2>
               
               <div class="flex items-center gap-2">
                 <label class="text-sm">Interval (sec):</label>
@@ -106,51 +104,53 @@ export default {
                   class="input input-bordered input-sm w-20"
                   min="1"
                   placeholder="60"
+                  @click.stop
                 />
               </div>
               
               <input
                 type="checkbox"
                 :checked="isEnabled"
-                @click.prevent="toggleSchedule"
+                @click.stop.prevent="toggleSchedule"
                 class="toggle"
                 :class="isEnabled ? 'toggle-success' : 'toggle-neutral'"
               />
               
               <button
                 v-if="description"
-                @click="isDescriptionExpanded = !isDescriptionExpanded"
+                @click.stop="isDescriptionExpanded = !isDescriptionExpanded"
                 class="btn btn-ghost btn-xs"
               >
                 {{ isDescriptionExpanded ? '📖 Hide Info' : '📖 Info' }}
               </button>
             </div>
-            <div v-if="description && isDescriptionExpanded" class="collapse collapse-open mt-2">
-              <div class="collapse-content bg-base-200 rounded-box p-3">
+            
+            <div v-if="description && isDescriptionExpanded" class="mt-2" @click.stop>
+              <div class="bg-base-200 rounded-box p-3">
                 <p class="text-sm text-base-content/80 whitespace-pre-line">{{ description }}</p>
               </div>
             </div>
+            
             <div class="flex items-center mt-2">
-              <div class="tooltip tooltip-right" :data-tip="host" v-for="(hostData, host) in hosts">
-              <div
-                aria-label="status"
-                class='status p-1 m-1'
-                :class="{
-                'status-success animate-bounce':(processes[host] ?? []).length > 0 && processes[host].at(-1).status === 'running',
-                'status-success':(processes[host] ?? []).length > 0 && processes[host].at(-1).status === 'finished',
-                '':(processes[host] ?? []).length == 0,
-                'status-error':(processes[host] ?? []).length > 0 && ['failed', 'error'].includes(processes[host].at(-1).status),
-                }">
-              </div>
+              <div class="tooltip tooltip-right" :data-tip="host" v-for="(hostData, host) in hosts" :key="host">
+                <div
+                  aria-label="status"
+                  class='status p-1 m-1'
+                  :class="{
+                    'status-success animate-bounce': (processes[host] ?? []).length > 0 && processes[host].at(-1).status === 'running',
+                    'status-success': (processes[host] ?? []).length > 0 && processes[host].at(-1).status === 'finished',
+                    '': (processes[host] ?? []).length == 0,
+                    'status-error': (processes[host] ?? []).length > 0 && ['failed', 'error'].includes(processes[host].at(-1).status),
+                  }">
+                </div>
               </div>
             </div>
           </div>
-          <button class="btn btn-ghost btn-sm" @click="isExpanded = !isExpanded">
-            {{ isExpanded ? 'Collapse' : 'Expand' }}
-          </button>
         </div>
-        
-        <div v-show="isExpanded" class="mt-4">
+      </summary>
+      
+      <div class="collapse-content">
+        <div class="pt-4">
           <host-process-item
             v-for="(hostData, host) in hosts"
             :key="host"
@@ -161,6 +161,6 @@ export default {
           ></host-process-item>
         </div>
       </div>
-    </div>
+    </details>
   `
 }

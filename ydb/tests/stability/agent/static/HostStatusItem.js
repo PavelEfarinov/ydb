@@ -6,7 +6,7 @@ export default {
   },
   template: `
     <tr>
-      <td class="font-mono text-s">{{ host }}</td>
+      <td class="font-mono text-s"><a :href="'http://' + host + ':8765/monitoring/cluster/nodes'" target="_blank">{{ host }}</a></td>
       <td>
         <div class="badge badge-s" :class="{
           'badge-success': host_data.status === 'ok',
