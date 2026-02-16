@@ -1,20 +1,20 @@
 PY3_PROGRAM()
 
 PY_SRCS(
-    __main__.py
-    install.py
-    config.py
-    models.py
-    defaults.py
-    agent_app.py
-    agent_router.py
-    orchestrator_app.py
-    orchestrator_router.py
+    __init__.py
+    internal/install.py
+    internal/config.py
+    internal/models.py
+    internal/defaults.py
+    apps/agent_app.py
+    routers/agent_router.py
+    apps/orchestrator_app.py
+    routers/orchestrator_router.py
     app.py
 )
 
 DATA(
-    arcadia/ydb/tests/stability/agent/static
+    arcadia/ydb/tests/stability/nemesis_app/static
 )
 
 DEPENDS(

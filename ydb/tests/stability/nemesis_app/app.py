@@ -5,8 +5,8 @@ import os
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from ydb.tests.stability.agent import config
-from ydb.tests.stability.agent.install import get_hosts_from_yaml
+from ydb.tests.stability.nemesis_app.internal import config
+from ydb.tests.stability.nemesis_app.internal.install import get_hosts_from_yaml
 from ydb.tests.library.stability.healthcheck.healthcheck_reporter import HealthCheckReporter
 
 
@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
         healthcheck_reporter.start_healthchecks()
 
         # Share state with orchestrator router
-        from ydb.tests.stability.agent import orchestrator_router
+        from ydb.tests.stability.nemesis_app.routers import orchestrator_router
         orchestrator_router.hosts = hosts
 
     yield
@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
             healthcheck_reporter.stop_healthchecks()
 
         # Cancel all scheduled tasks
-        from ydb.tests.stability.agent import orchestrator_router
+        from ydb.tests.stability.nemesis_app.routers import orchestrator_router
         for task_info in orchestrator_router.scheduled_tasks.values():
             if 'task' in task_info:
                 task_info['task'].cancel()
@@ -84,7 +84,7 @@ def create_app():
         return {"status": "ok"}
 
     # Always include agent router (available in both modes)
-    from ydb.tests.stability.agent.agent_router import router as agent_router
+    from ydb.tests.stability.nemesis_app.routers.agent_router import router as agent_router
     app.include_router(agent_router)
 
     # Include routers based on configuration
@@ -93,7 +93,7 @@ def create_app():
         print("Running in AGENT mode")
     else:
         # Orchestrator mode: include orchestrator router and static files
-        from ydb.tests.stability.agent.orchestrator_router import router as orchestrator_router
+        from ydb.tests.stability.nemesis_app.routers.orchestrator_router import router as orchestrator_router
         app.include_router(orchestrator_router)
         app.mount("/static", StaticFiles(directory=settings.static_location), name="static")
         print("Running in ORCHESTRATOR mode (with agent endpoints)")

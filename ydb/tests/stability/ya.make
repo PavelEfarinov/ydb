@@ -1,7 +1,7 @@
 RECURSE(
     ydb
     tool
-    agent
+    nemesis_app
 )
 
 RECURSE_FOR_TESTS(

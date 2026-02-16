@@ -3,8 +3,8 @@ import socket
 
 import requests
 from fastapi import APIRouter
-from ydb.tests.stability.agent.defaults import PROCESS_TYPES
-from ydb.tests.stability.agent.models import ProcessInfo, SetScheduleRequest, CreateHostProcessRequest
+from ydb.tests.stability.nemesis_app.internal.defaults import PROCESS_TYPES
+from ydb.tests.stability.nemesis_app.internal.models import ProcessInfo, SetScheduleRequest, CreateHostProcessRequest
 import asyncio
 
 
@@ -20,7 +20,7 @@ def is_local_host(host: str) -> bool:
     """Check if the host is the local machine"""
     try:
         # Get configured app_host from settings
-        from ydb.tests.stability.agent.config import Settings
+        from ydb.tests.stability.nemesis_app.internal.config import Settings
         settings = Settings()
         app_host = settings.app_host
 
@@ -45,8 +45,8 @@ async def run_process_on_host(host, process_type, action='run', track_history=Fa
         # Check if this is a call to ourselves
         if is_local_host(host):
             # Direct call to avoid HTTP deadlock with single worker
-            from ydb.tests.stability.agent.agent_router import create_process
-            from ydb.tests.stability.agent.models import CreateProcessRequest
+            from ydb.tests.stability.nemesis_app.routers.agent_router import create_process
+            from ydb.tests.stability.nemesis_app.internal.models import CreateProcessRequest
 
             req = CreateProcessRequest(type=process_type, action=action)
             result = await create_process(req)
@@ -55,7 +55,7 @@ async def run_process_on_host(host, process_type, action='run', track_history=Fa
             # Remote call via HTTP
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, lambda: requests.post(f"http://{host}:31434/api/processes", json={'type': process_type, 'action': action}, timeout=5))
-        
+
         # Track in history if requested (for scheduled executions)
         if track_history:
             from datetime import datetime
@@ -68,7 +68,7 @@ async def run_process_on_host(host, process_type, action='run', track_history=Fa
             # Keep only last 50 entries
             if len(scheduled_executions_history) > 50:
                 scheduled_executions_history.pop(0)
-                
+
     except Exception as e:
         print(f"Failed to start process {process_type} on {host}: {e}")
 
@@ -81,7 +81,7 @@ async def schedule_process(process_type: str, nemesis_config: dict, custom_inter
         # Get config for this process type
         p_config = nemesis_config.get(process_type, {})
         process_def = PROCESS_TYPES[process_type]
-        
+
         # Use custom interval if provided, otherwise fall back to config
         interval = custom_interval if custom_interval is not None else p_config.get('schedule', process_def.get('schedule', 60))
 
@@ -105,7 +105,7 @@ async def schedule_process(process_type: str, nemesis_config: dict, custom_inter
 async def get_all_host_processes(host: str):
     if is_local_host(host):
         # Direct call to avoid HTTP deadlock
-        from ydb.tests.stability.agent.agent_router import get_all_processes
+        from ydb.tests.stability.nemesis_app.routers.agent_router import get_all_processes
         return await get_all_processes()
     else:
         return requests.get(f"http://{host}:31434/api/processes").json()
@@ -115,7 +115,7 @@ async def fetch_host_processes(host):
     try:
         if is_local_host(host):
             # Direct call to avoid HTTP deadlock
-            from ydb.tests.stability.agent.agent_router import get_all_processes
+            from ydb.tests.stability.nemesis_app.routers.agent_router import get_all_processes
             return host, await get_all_processes()
         else:
             loop = asyncio.get_running_loop()
@@ -139,7 +139,7 @@ async def create_host_process(req: CreateHostProcessRequest):
         return {"status": "error", "message": "Invalid process type"}
     if req.host not in hosts:
         return {"status": "error", "message": "Invalid host"}
-    
+
     # Check if this nemesis type is currently scheduled
     if req.type in scheduled_tasks and scheduled_tasks[req.type].get('enabled', False):
         return {"status": "error", "message": f"Cannot manually run {req.type}: it is currently scheduled. Disable scheduling first."}
@@ -149,8 +149,8 @@ async def create_host_process(req: CreateHostProcessRequest):
 
         if is_local_host(req.host):
             # Direct call to avoid HTTP deadlock
-            from ydb.tests.stability.agent.agent_router import create_process
-            from ydb.tests.stability.agent.models import CreateProcessRequest
+            from ydb.tests.stability.nemesis_app.routers.agent_router import create_process
+            from ydb.tests.stability.nemesis_app.internal.models import CreateProcessRequest
 
             process_req = CreateProcessRequest(type=req.type, action=action)
             result = await create_process(process_req)
@@ -199,7 +199,7 @@ async def set_schedule(req: SetScheduleRequest):
         return {"status": "error", "message": "Invalid process type"}
 
     # Import here to get the current nemesis_config
-    from ydb.tests.stability.agent.app import nemesis_config
+    from ydb.tests.stability.nemesis_app.app import nemesis_config
 
     if req.enabled:
         if req.type in scheduled_tasks and scheduled_tasks[req.type]['enabled']:
@@ -246,7 +246,7 @@ async def get_schedule_history():
 @router.get("/api/healthcheck", response_model=Dict[str, Any])
 async def get_healthcheck():
     # Import here to get the current healthcheck_reporter
-    from ydb.tests.stability.agent.app import healthcheck_reporter
+    from ydb.tests.stability.nemesis_app.app import healthcheck_reporter
 
     if healthcheck_reporter:
         return healthcheck_reporter.last_results
@@ -256,7 +256,7 @@ async def get_healthcheck():
 @router.post("/api/config/reload", response_model=Dict[str, Any])
 async def reload_config():
     # Import here to get the load function
-    from ydb.tests.stability.agent.app import load_nemesis_config
+    from ydb.tests.stability.nemesis_app.app import load_nemesis_config
 
     config = load_nemesis_config()
     return {"status": "ok", "config": config}

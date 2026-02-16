@@ -4,9 +4,9 @@ import io
 import threading
 from typing import List
 
-from fastapi import APIRouter
-from ydb.tests.stability.agent.defaults import PROCESS_TYPES
-from ydb.tests.stability.agent.models import CreateProcessRequest, ProcessInfo
+from fastapi import FastAPI
+from ydb.tests.stability.nemesis_app.internal.defaults import PROCESS_TYPES
+from ydb.tests.stability.nemesis_app.internal.models import CreateProcessRequest, ProcessInfo
 
 
 class ProcessManager:
@@ -97,29 +97,25 @@ class ProcessManager:
 
 
 manager = ProcessManager()
-router = APIRouter()
+app = FastAPI()
 
 
-@router.get("/api/processes", response_model=List[ProcessInfo])
+@app.get("/health")
+async def get_health():
+    return {"status": "ok"}
+
+
+@app.get("/api/processes", response_model=List[ProcessInfo])
 async def get_all_processes():
     return manager.get_all()
 
 
-@router.get("/api/process_types")
+@app.get("/api/process_types", response_model=List[str])
 async def get_process_types():
-    """Return process types with their descriptions"""
-    result = []
-    for name, definition in PROCESS_TYPES.items():
-        runner = definition.get('runner')
-        description = runner.nemesis_description if runner and hasattr(runner, 'nemesis_description') else ""
-        result.append({
-            "name": name,
-            "description": description
-        })
-    return result
+    return list(PROCESS_TYPES.keys())
 
 
-@router.post("/api/processes")
+@app.post("/api/processes")
 async def create_process(req: CreateProcessRequest):
     if req.type not in PROCESS_TYPES:
         return {"status": "error", "message": "Invalid process type"}

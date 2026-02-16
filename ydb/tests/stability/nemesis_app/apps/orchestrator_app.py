@@ -5,10 +5,10 @@ from typing import List, Dict, Any
 import requests
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from ydb.tests.stability.agent import config
-from ydb.tests.stability.agent.defaults import PROCESS_TYPES
-from ydb.tests.stability.agent.install import get_hosts_from_yaml, install_on_hosts, stop_agent_services
-from ydb.tests.stability.agent.models import ProcessInfo, SetScheduleRequest, CreateHostProcessRequest
+from ydb.tests.stability.nemesis_app.internal import config
+from ydb.tests.stability.nemesis_app.internal.defaults import PROCESS_TYPES
+from ydb.tests.stability.nemesis_app.internal.install import get_hosts_from_yaml, install_on_hosts, stop_agent_services
+from ydb.tests.stability.nemesis_app.internal.models import ProcessInfo, SetScheduleRequest, CreateHostProcessRequest
 from ydb.tests.library.stability.healthcheck.healthcheck_reporter import HealthCheckReporter
 import asyncio
 import json

@@ -1,8 +1,8 @@
 import sys
 import uvicorn
 from functools import lru_cache
-from ydb.tests.stability.agent import config
-from ydb.tests.stability.agent.install import get_hosts_from_yaml, install_on_hosts, stop_agent_services
+from ydb.tests.stability.nemesis_app.internal import config
+from ydb.tests.stability.nemesis_app.internal.install import get_hosts_from_yaml, install_on_hosts, stop_agent_services
 
 
 @lru_cache
@@ -55,7 +55,7 @@ def main():
     # Default mode: run the application
     # workers=1 is important because we store state in memory
     uvicorn.run(
-        "ydb.tests.stability.agent.app:app",
+        "ydb.tests.stability.nemesis_app.app:app",
         host=settings.app_host,
         port=31434,
         workers=1
