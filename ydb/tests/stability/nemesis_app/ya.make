@@ -1,7 +1,7 @@
 PY3_PROGRAM()
 
 PY_SRCS(
-    __init__.py
+    __main__.py
     internal/install.py
     internal/config.py
     internal/models.py
