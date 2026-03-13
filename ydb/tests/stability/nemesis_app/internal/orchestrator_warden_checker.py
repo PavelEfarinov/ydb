@@ -9,13 +9,14 @@ Uses warden definitions from liveness_warden_factory() and orchestrator_safety_w
 """
 
 import asyncio
+import json
 import logging
+import subprocess
 import threading
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime
-from typing import Dict, List, Any, Callable
+from typing import Dict, List, Any
 
 from ydb.tests.stability.nemesis_app.internal.agent_warden_checker import (
     WardenCheckResult,
@@ -351,109 +352,131 @@ class OrchestratorWardenChecker:
             self._cluster = MinimalCluster(self._hosts, self._mon_port)
         return self._cluster
 
+    # Default path to the compiled nemesis binary
+    NEMESIS_BINARY_PATH = '/Berkanavt/nemesis/bin/agent'
+
     def _run_liveness_checks_sync(
         self,
         cluster,
-        per_warden_timeout_seconds: int = 30
+        timeout_seconds: int = 60
     ) -> List[WardenCheckResult]:
         """
-        Run liveness checks using existing wardens.
+        Run liveness checks using subprocess with hard timeout.
 
-        Each warden is executed with a timeout to prevent hanging on slow/loaded clusters.
-        Note: Library wardens iterate over ALL nodes, so total time can be
-        nodes_count * http_timeout. Consider using optimized single-node wardens
-        for large clusters.
+        This method spawns a separate process to run liveness checks.
+        The process can be killed if it exceeds the timeout, providing
+        a reliable way to prevent hanging on slow/loaded clusters.
 
         Args:
-            cluster: The cluster object to check
-            per_warden_timeout_seconds: Timeout for each individual warden check (default 30s)
+            cluster: The cluster object (used for config path)
+            timeout_seconds: Total timeout for all liveness checks (default 60s)
         """
-        # Import existing liveness wardens
-        from ydb.tests.library.wardens.hive import AllTabletsAliveLivenessWarden, BootQueueSizeWarden
-        from ydb.tests.library.wardens.schemeshard import SchemeShardHasNoInFlightTransactions
-        from ydb.tests.library.wardens.datashard import TxCompleteLagLivenessWarden
+        from ydb.tests.stability.nemesis_app.internal.config import Settings
 
-        # Define wardens to run
-        warden_configs = [
-            ('AllTabletsAlive', lambda: AllTabletsAliveLivenessWarden(cluster)),
-            ('BootQueueSize', lambda: BootQueueSizeWarden(cluster)),
-            ('SchemeShardNoInFlightTx', lambda: SchemeShardHasNoInFlightTransactions(cluster)),
-            ('TxCompleteLag', lambda: TxCompleteLagLivenessWarden(cluster)),
+        # Get config path from settings
+        try:
+            settings = Settings()
+            yaml_config = settings.yaml_config_location
+        except Exception as e:
+            logger.error(f"Failed to get settings: {e}")
+            return [WardenCheckResult(
+                name='LivenessChecks',
+                category='liveness',
+                violations=[],
+                status='error',
+                error_message=f"Failed to get settings: {e}"
+            )]
+
+        logger.info(f"Running liveness checks via subprocess with {timeout_seconds}s timeout")
+
+        # Build command to run liveness checks
+        # Use the compiled nemesis binary directly
+        cmd = [
+            self.NEMESIS_BINARY_PATH,
+            'liveness',
+            '--yaml-config-location', yaml_config,
+            '--mon-port', str(self._mon_port)
         ]
 
-        # Log cluster size for diagnostics
-        nodes_count = len(cluster.nodes) if cluster and cluster.nodes else 0
-        logger.info(f"Running {len(warden_configs)} liveness wardens on cluster with {nodes_count} nodes")
-        logger.info(f"WARNING: Library wardens iterate ALL nodes. Max time per warden: {nodes_count} * http_timeout")
-
-        # Run all checks with timeout
-        results = []
-        for name, warden_fn in warden_configs:
-            warden_start = time.time()
-            logger.info(f"Starting liveness warden: {name}")
-            result = self._run_liveness_warden_with_timeout(
-                name, warden_fn, timeout_seconds=per_warden_timeout_seconds
-            )
-            warden_elapsed = time.time() - warden_start
-            results.append(result)
-            logger.info(f"Liveness warden {name}: status={result.status}, elapsed={warden_elapsed:.1f}s")
-
-        return results
-
-    def _run_liveness_warden_with_timeout(
-        self,
-        name: str,
-        warden_fn: Callable,
-        timeout_seconds: int = 60
-    ) -> WardenCheckResult:
-        """
-        Run a single liveness warden with timeout protection.
-
-        Uses ThreadPoolExecutor to run the warden in a separate thread with timeout.
-        This prevents hanging on slow/loaded clusters where HTTP requests to
-        monitoring endpoints may take too long.
-
-        Args:
-            name: Name of the warden
-            warden_fn: Factory function that creates the warden
-            timeout_seconds: Maximum time to wait for the warden to complete
-        """
-        def execute_warden():
-            warden = warden_fn()
-            return warden.list_of_liveness_violations
-
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(execute_warden)
+            start_time = time.time()
+            logger.info(f"Executing: {' '.join(cmd)}")
+
+            # Run subprocess with timeout
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds
+            )
+
+            elapsed = time.time() - start_time
+            logger.info(f"Subprocess completed in {elapsed:.1f}s with return code {result.returncode}")
+
+            if result.stderr:
+                logger.debug(f"Subprocess stderr: {result.stderr[:500]}")
+
+            # Parse JSON output
+            if result.stdout:
                 try:
-                    violations = future.result(timeout=timeout_seconds)
-                    status = 'violation' if violations else 'ok'
-                    if violations:
-                        logger.info(f"{name}: {len(violations)} violation(s) found")
-                    return WardenCheckResult(
-                        name=name,
-                        category='liveness',
-                        violations=violations if violations else [],
-                        status=status
-                    )
-                except TimeoutError:
-                    logger.warning(f"{name}: timed out after {timeout_seconds}s")
-                    return WardenCheckResult(
-                        name=name,
+                    output = json.loads(result.stdout)
+                    checks = output.get('checks', [])
+
+                    # Convert to WardenCheckResult objects
+                    results = []
+                    for check in checks:
+                        results.append(WardenCheckResult(
+                            name=check.get('name', 'Unknown'),
+                            category=check.get('category', 'liveness'),
+                            violations=check.get('violations', []),
+                            status=check.get('status', 'error'),
+                            error_message=check.get('error_message')
+                        ))
+
+                    if output.get('status') == 'error' and output.get('error_message'):
+                        logger.error(f"Liveness subprocess error: {output['error_message']}")
+
+                    return results
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse liveness output: {e}")
+                    logger.error(f"Raw output: {result.stdout[:500]}")
+                    return [WardenCheckResult(
+                        name='LivenessChecks',
                         category='liveness',
                         violations=[],
                         status='error',
-                        error_message=f"Timeout after {timeout_seconds}s - cluster may be overloaded"
-                    )
+                        error_message=f"Failed to parse output: {e}"
+                    )]
+            else:
+                logger.error("No output from liveness subprocess")
+                return [WardenCheckResult(
+                    name='LivenessChecks',
+                    category='liveness',
+                    violations=[],
+                    status='error',
+                    error_message="No output from subprocess"
+                )]
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Liveness checks timed out after {timeout_seconds}s - killing subprocess")
+            return [WardenCheckResult(
+                name='LivenessChecks',
+                category='liveness',
+                violations=[],
+                status='error',
+                error_message=f"Timeout after {timeout_seconds}s - subprocess killed"
+            )]
+
         except Exception as e:
-            logger.error(f"{name}: error - {e}")
-            return WardenCheckResult(
-                name=name,
+            logger.error(f"Failed to run liveness subprocess: {e}")
+            return [WardenCheckResult(
+                name='LivenessChecks',
                 category='liveness',
                 violations=[],
                 status='error',
                 error_message=str(e)
-            )
+            )]
 
     def _run_pdisk_check_sync(self, cluster) -> List[WardenCheckResult]:
         """Run PDisk state check (uses HTTP, not SSH)."""

@@ -1,4 +1,7 @@
 import argparse
+import json
+import logging
+import sys
 import uvicorn
 from functools import lru_cache
 from ydb.tests.stability.nemesis_app.internal import config
@@ -16,8 +19,8 @@ def parse_args():
     parser.add_argument(
         'command',
         nargs='?',
-        choices=['run', 'stop', ''],
-        help='Command to run: run (install services), stop (stop services)'
+        choices=['run', 'stop', 'liveness', ''],
+        help='Command to run: run (install services), stop (stop services), liveness (run liveness checks)'
     )
 
     # Optional settings arguments (override env and defaults)
@@ -27,6 +30,7 @@ def parse_args():
     parser.add_argument('--app-port', type=int, help='Port to bind the application to')
     parser.add_argument('--yaml-config-location', help='Path to cluster.yaml config file')
     parser.add_argument('--static-location', help='Path to static files directory')
+    parser.add_argument('--mon-port', type=int, default=8765, help='Monitoring port for liveness checks')
 
     return parser.parse_args()
 
@@ -35,8 +39,100 @@ def parse_args():
 def get_settings(**kwargs):
     """Get settings with argv arguments having highest priority."""
     settings = config.Settings.from_args(**kwargs)
-    print(settings)
+    print(settings, file=sys.stderr)
     return settings
+
+
+def run_liveness_checks(settings, mon_port: int):
+    """
+    Run liveness checks synchronously and output JSON result to stdout.
+
+    This function is designed to be called as a subprocess with timeout.
+    It runs the library wardens directly without FastAPI overhead.
+
+    Output format (JSON):
+    {
+        "status": "completed" | "error",
+        "checks": [
+            {
+                "name": "AllTabletsAlive",
+                "category": "liveness",
+                "status": "ok" | "violation" | "error",
+                "violations": [...],
+                "error_message": "..." (optional)
+            },
+            ...
+        ],
+        "error_message": "..." (optional, only if status is "error")
+    }
+    """
+    # Suppress all logging to stderr to keep stdout clean for JSON
+    logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+
+    # Get hosts from config
+    hosts = get_hosts_from_yaml(settings.yaml_config_location)
+
+    if not hosts:
+        result = {
+            "status": "error",
+            "checks": [],
+            "error_message": "No hosts found in config"
+        }
+        print(json.dumps(result))
+        return
+
+    # Import wardens
+    from ydb.tests.library.wardens.hive import AllTabletsAliveLivenessWarden, BootQueueSizeWarden
+    from ydb.tests.library.wardens.schemeshard import SchemeShardHasNoInFlightTransactions
+    from ydb.tests.library.wardens.datashard import TxCompleteLagLivenessWarden
+    from ydb.tests.stability.nemesis_app.internal.orchestrator_warden_checker import MinimalCluster
+
+    # Create cluster object
+    cluster = MinimalCluster(hosts, mon_port)
+
+    # Define wardens to run
+    warden_configs = [
+        ('AllTabletsAlive', lambda: AllTabletsAliveLivenessWarden(cluster)),
+        ('BootQueueSize', lambda: BootQueueSizeWarden(cluster)),
+        ('SchemeShardNoInFlightTx', lambda: SchemeShardHasNoInFlightTransactions(cluster)),
+        ('TxCompleteLag', lambda: TxCompleteLagLivenessWarden(cluster)),
+    ]
+
+    checks = []
+    try:
+        for name, warden_fn in warden_configs:
+            try:
+                warden = warden_fn()
+                violations = warden.list_of_liveness_violations
+                status = 'violation' if violations else 'ok'
+                checks.append({
+                    "name": name,
+                    "category": "liveness",
+                    "status": status,
+                    "violations": violations if violations else []
+                })
+            except Exception as e:
+                checks.append({
+                    "name": name,
+                    "category": "liveness",
+                    "status": "error",
+                    "violations": [],
+                    "error_message": str(e)
+                })
+
+        result = {
+            "status": "completed",
+            "checks": checks
+        }
+    except Exception as e:
+        result = {
+            "status": "error",
+            "checks": checks,
+            "error_message": str(e)
+        }
+
+    # Output JSON to stdout
+    print(json.dumps(result))
 
 
 def main():
@@ -85,6 +181,12 @@ def main():
         print("\n" + "=" * 60)
         print("All services stopped successfully!")
         print("=" * 60 + "\n")
+        return
+
+    elif args.command == "liveness":
+        # Liveness mode: run liveness checks and output JSON to stdout
+        # This is designed to be called as a subprocess with timeout
+        run_liveness_checks(settings, args.mon_port)
         return
 
     # Default mode: run the application
