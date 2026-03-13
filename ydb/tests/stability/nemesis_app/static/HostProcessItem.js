@@ -64,15 +64,9 @@ export default {
             <div class="font-mono bg-base-300 p-2 rounded text-xs mb-2 break-all">
               $ {{ latestProcess.command }}
             </div>
-            <div class="grid grid-cols-2 gap-2">
-              <div>
-                <div class="text-xs font-bold mb-1">STDOUT</div>
-                <pre class="bg-black text-green-400 p-2 rounded h-32 overflow-auto text-xs">{{ latestProcess.stdout }}</pre>
-              </div>
-              <div>
-                <div class="text-xs font-bold mb-1">STDERR</div>
-                <pre class="bg-black text-red-400 p-2 rounded h-32 overflow-auto text-xs">{{ latestProcess.stderr }}</pre>
-              </div>
+            <div>
+              <div class="text-xs font-bold mb-1">Logs</div>
+              <pre class="bg-black text-green-400 p-2 rounded h-32 overflow-auto text-xs">{{ latestProcess.logs }}</pre>
             </div>
           </div>
 
@@ -101,7 +95,7 @@ export default {
                     </td>
                     <td>{{ proc.ret_code }}</td>
                     <td class="max-w-xs truncate font-mono text-xs opacity-70">
-                      {{ (proc.stdout || proc.stderr || '').substring(0, 50) }}...
+                      {{ (proc.logs || '').substring(0, 50) }}...
                     </td>
                   </tr>
                 </tbody>

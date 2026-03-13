@@ -6,10 +6,10 @@ PY_SRCS(
     internal/config.py
     internal/models.py
     internal/defaults.py
-    apps/agent_app.py
     routers/agent_router.py
-    apps/orchestrator_app.py
     routers/orchestrator_router.py
+    internal/agent_warden_checker.py
+    internal/orchestrator_warden_checker.py
     app.py
 )
 

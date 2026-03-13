@@ -21,15 +21,9 @@ export default {
           </div>
         </div>
 
-        <div class="grid grid-cols-2 gap-4">
-          <div>
-            <h3 class="font-bold text-sm mb-1">STDOUT</h3>
-            <pre class="bg-black text-green-400 p-2 rounded h-40 overflow-auto text-xs">{{ process_data.stdout }}</pre>
-          </div>
-          <div>
-            <h3 class="font-bold text-sm mb-1">STDERR</h3>
-            <pre class="bg-black text-red-400 p-2 rounded h-40 overflow-auto text-xs">{{ process_data.stderr }}</pre>
-          </div>
+        <div>
+          <h3 class="font-bold text-sm mb-1">Logs</h3>
+          <pre class="bg-black text-green-400 p-2 rounded h-40 overflow-auto text-xs">{{ process_data.logs }}</pre>
         </div>
       </div>
     </div>

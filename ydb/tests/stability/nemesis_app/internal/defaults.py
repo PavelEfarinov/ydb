@@ -106,7 +106,7 @@ class KillNodeNemesis(AbstractAgentNemesis):
 
     def inject_fault(self):
         """Kill the YDB node process using SIGKILL."""
-        cmd = "ps aux | grep '\\--ic-port' | grep -v grep | awk '{ print $2 }' | tail -n 1 | xargs -r sudo kill -%d" % (
+        cmd = "ps aux | grep '\\--ic-port' | grep -v grep | awk '{ print $2 }' | shuf -n 1 | xargs -r sudo kill -%d" % (
             int(signal.SIGKILL),
         )
         self.__logger.info(f"Executing: {cmd}")

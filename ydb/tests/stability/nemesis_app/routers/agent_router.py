@@ -1,12 +1,17 @@
 import asyncio
 import logging
 import io
+import socket
 import threading
-from typing import List
+from typing import List, Dict, Any
 
 from fastapi import APIRouter
 from ydb.tests.stability.nemesis_app.internal.defaults import PROCESS_TYPES
 from ydb.tests.stability.nemesis_app.internal.models import CreateProcessRequest, ProcessInfo
+from ydb.tests.stability.nemesis_app.internal.agent_warden_checker import AgentWardenChecker
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProcessManager:
@@ -19,8 +24,7 @@ class ProcessManager:
             "id": proc_id,
             "type": type_name,
             "command": f"{type_name} ({action})",
-            "stdout": "",
-            "stderr": "",
+            "logs": "",
             "ret_code": None,
             "status": "running"
         }
@@ -72,25 +76,31 @@ class ProcessManager:
             # Background task to flush logs
             async def flush_logs():
                 while self.processes[proc_id]['status'] == 'running':
-                    self.processes[proc_id]['stdout'] = log_capture_string.getvalue()
+                    self.processes[proc_id]['logs'] = log_capture_string.getvalue()
                     await asyncio.sleep(1)
                 # Final flush
-                self.processes[proc_id]['stdout'] = log_capture_string.getvalue()
+                self.processes[proc_id]['logs'] = log_capture_string.getvalue()
 
             loop = asyncio.get_running_loop()
             flush_task = asyncio.create_task(flush_logs())
 
-            await loop.run_in_executor(None, execute_with_logging)
-
-            self.processes[proc_id]['status'] = 'finished'
-            self.processes[proc_id]['ret_code'] = 0
-
-            await flush_task
+            try:
+                await loop.run_in_executor(None, execute_with_logging)
+                self.processes[proc_id]['status'] = 'finished'
+                self.processes[proc_id]['ret_code'] = 0
+            except Exception as e:
+                import traceback
+                self.processes[proc_id]['status'] = 'error'
+                self.processes[proc_id]['ret_code'] = 1
+                await flush_task
+                self.processes[proc_id]['logs'] = log_capture_string.getvalue() + f"\nError executing process: {str(e)}\n{traceback.format_exc()}"
             log_capture_string.close()
 
         except Exception as e:
-            self.processes[proc_id]['stderr'] += f"\nError executing process: {str(e)}"
+            import traceback
+            self.processes[proc_id]['logs'] += f"\nError setting up process: {str(e)}\n{traceback.format_exc()}"
             self.processes[proc_id]['status'] = 'error'
+            self.processes[proc_id]['ret_code'] = 1
 
     def get_all(self):
         return self.processes
@@ -98,6 +108,7 @@ class ProcessManager:
 
 manager = ProcessManager()
 router = APIRouter()
+warden_checker: AgentWardenChecker = None  # initialized in app.py
 
 
 @router.get("/api/processes", response_model=List[ProcessInfo])
@@ -131,3 +142,29 @@ async def create_process(req: CreateProcessRequest):
 
     await manager.start_process(req.type, runner, action)
     return {"status": "started"}
+
+
+@router.post("/api/warden/start", response_model=Dict[str, Any])
+async def start_warden_checks():
+    """Start warden checks asynchronously."""
+    hostname = socket.gethostname()
+    logger.info(f"[{hostname}] Agent warden checks start requested")
+
+    started = await warden_checker.start_checks()
+    if started:
+        logger.info(f"[{hostname}] Agent warden checks started successfully")
+        return {"status": "started"}
+    else:
+        logger.info(f"[{hostname}] Agent warden checks already running")
+        return {"status": "already_running"}
+
+
+@router.get("/api/warden/result", response_model=Dict[str, Any])
+async def get_warden_result():
+    """Get the last warden check result."""
+    hostname = socket.gethostname()
+    result = warden_checker.get_last_result()
+    status = result.get("status", "unknown")
+    safety_count = len(result.get("safety_checks", []))
+    logger.debug(f"[{hostname}] Agent warden result requested: status={status}, safety_checks={safety_count}")
+    return result

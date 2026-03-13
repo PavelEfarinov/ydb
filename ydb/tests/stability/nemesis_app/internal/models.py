@@ -6,8 +6,7 @@ class ProcessInfo(BaseModel):
     id: int
     type: str
     command: str
-    stdout: str
-    stderr: str
+    logs: str
     ret_code: Optional[int]
     status: str
 

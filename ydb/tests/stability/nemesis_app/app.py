@@ -8,6 +8,8 @@ from fastapi.staticfiles import StaticFiles
 from ydb.tests.stability.nemesis_app.internal import config
 from ydb.tests.stability.nemesis_app.internal.install import get_hosts_from_yaml
 from ydb.tests.library.stability.healthcheck.healthcheck_reporter import HealthCheckReporter
+from ydb.tests.stability.nemesis_app.internal.agent_warden_checker import AgentWardenChecker
+from ydb.tests.stability.nemesis_app.internal.orchestrator_warden_checker import OrchestratorWardenChecker
 
 
 @lru_cache
@@ -43,6 +45,10 @@ async def lifespan(app: FastAPI):
     global hosts, healthcheck_reporter
     settings = get_settings()
 
+    # Initialize agent WardenChecker (always, for both agent and orchestrator modes)
+    from ydb.tests.stability.nemesis_app.routers import agent_router
+    agent_router.warden_checker = AgentWardenChecker()
+
     # Orchestrator-specific initialization
     if settings.nemesis_type != 'agent':
         # Load hosts from config (no installation here - that's done via 'install' command)
@@ -59,6 +65,7 @@ async def lifespan(app: FastAPI):
         # Share state with orchestrator router
         from ydb.tests.stability.nemesis_app.routers import orchestrator_router
         orchestrator_router.hosts = hosts
+        orchestrator_router.orchestrator_warden_checker = OrchestratorWardenChecker(hosts=hosts, mon_port=orchestrator_router.mon_port)
 
     yield
 

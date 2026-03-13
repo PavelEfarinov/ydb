@@ -1,11 +1,19 @@
-from typing import List, Dict, Any
+import asyncio
+import logging
 import socket
+from typing import List, Dict, Any
 
 import requests
 from fastapi import APIRouter
 from ydb.tests.stability.nemesis_app.internal.defaults import PROCESS_TYPES
 from ydb.tests.stability.nemesis_app.internal.models import ProcessInfo, SetScheduleRequest, CreateHostProcessRequest
-import asyncio
+from ydb.tests.stability.nemesis_app.internal.orchestrator_warden_checker import (
+    OrchestratorWardenChecker,
+    get_all_warden_definitions,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
@@ -14,6 +22,14 @@ router = APIRouter()
 hosts = []
 scheduled_tasks = {}
 scheduled_executions_history = []  # List of {type, action, host, timestamp}
+mon_port = 8765  # Default monitoring port
+orchestrator_warden_checker: OrchestratorWardenChecker = None  # initialized in app.py
+
+
+def get_app_port() -> int:
+    """Get the configured app port from settings"""
+    from ydb.tests.stability.nemesis_app.internal.config import Settings
+    return Settings().app_port
 
 
 def is_local_host(host: str) -> bool:
@@ -53,8 +69,9 @@ async def run_process_on_host(host, process_type, action='run', track_history=Fa
             print(f"Started process {process_type} locally with action {action}: {result}")
         else:
             # Remote call via HTTP
+            port = get_app_port()
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, lambda: requests.post(f"http://{host}:31434/api/processes", json={'type': process_type, 'action': action}, timeout=5))
+            await loop.run_in_executor(None, lambda: requests.post(f"http://{host}:{port}/api/processes", json={'type': process_type, 'action': action}, timeout=5))
 
         # Track in history if requested (for scheduled executions)
         if track_history:
@@ -108,7 +125,8 @@ async def get_all_host_processes(host: str):
         from ydb.tests.stability.nemesis_app.routers.agent_router import get_all_processes
         return await get_all_processes()
     else:
-        return requests.get(f"http://{host}:31434/api/processes").json()
+        port = get_app_port()
+        return requests.get(f"http://{host}:{port}/api/processes").json()
 
 
 async def fetch_host_processes(host):
@@ -118,8 +136,9 @@ async def fetch_host_processes(host):
             from ydb.tests.stability.nemesis_app.routers.agent_router import get_all_processes
             return host, await get_all_processes()
         else:
+            port = get_app_port()
             loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(None, lambda: requests.get(f"http://{host}:31434/api/processes", timeout=5))
+            resp = await loop.run_in_executor(None, lambda: requests.get(f"http://{host}:{port}/api/processes", timeout=5))
             return host, resp.json()
     except Exception as e:
         print(f"Failed to fetch processes from {host}: {e}")
@@ -156,8 +175,9 @@ async def create_host_process(req: CreateHostProcessRequest):
             result = await create_process(process_req)
             return result
         else:
+            port = get_app_port()
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, lambda: requests.post(f"http://{req.host}:31434/api/processes", json={'type': req.type, 'action': action}, timeout=5))
+            await loop.run_in_executor(None, lambda: requests.post(f"http://{req.host}:{port}/api/processes", json={'type': req.type, 'action': action}, timeout=5))
             return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -186,7 +206,8 @@ async def get_hosts_health():
                 # Direct response for local host
                 aggregated_health[host] = {"status": "ok"}
             else:
-                resp = requests.get(f"http://{host}:31434/health")
+                port = get_app_port()
+                resp = requests.get(f"http://{host}:{port}/health")
                 aggregated_health[host] = resp.json()
         except Exception as e:
             aggregated_health[host] = {"status": "error", "message": str(e)}
@@ -260,3 +281,152 @@ async def reload_config():
 
     config = load_nemesis_config()
     return {"status": "ok", "config": config}
+
+
+@router.post("/api/hosts/warden/start", response_model=Dict[str, Any])
+async def start_warden_checks_on_all_hosts():
+    """
+    Start warden checks:
+    - Liveness checks run centrally on master (HTTP monitoring)
+    - Safety checks run on each agent (local log/dmesg access)
+    """
+    logger.info(f"Starting warden checks on all hosts. Total hosts: {len(hosts)}")
+    results = {"agents": {}, "master": {}}
+
+    # 1. Start orchestrator checks (liveness + orchestrator safety)
+    logger.info("Starting orchestrator warden checks (liveness + PDisk + aggregated)")
+    orchestrator_started = await orchestrator_warden_checker.start_checks()
+    results["master"] = {
+        "status": "started" if orchestrator_started else "already_running",
+        "type": "liveness"
+    }
+    logger.info(f"Orchestrator checks: {'started' if orchestrator_started else 'already running'}")
+
+    # 2. Start safety checks on all agents
+    async def start_safety_on_host(host):
+        try:
+            logger.debug(f"Starting safety checks on agent: {host}")
+            if is_local_host(host):
+                # Direct call to avoid HTTP deadlock
+                from ydb.tests.stability.nemesis_app.routers.agent_router import start_warden_checks
+                result = await start_warden_checks()
+                logger.debug(f"Agent {host} (local): {result.get('status', 'unknown')}")
+                return host, result
+            else:
+                port = get_app_port()
+                loop = asyncio.get_running_loop()
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: requests.post(f"http://{host}:{port}/api/warden/start", timeout=10)
+                )
+                result = resp.json()
+                logger.debug(f"Agent {host} (remote): {result.get('status', 'unknown')}")
+                return host, result
+        except Exception as e:
+            logger.error(f"Failed to start safety checks on agent {host}: {e}")
+            return host, {"status": "error", "message": str(e)}
+
+    tasks = [start_safety_on_host(host) for host in hosts]
+    task_results = await asyncio.gather(*tasks)
+
+    started_count = 0
+    error_count = 0
+    for host, result in task_results:
+        results["agents"][host] = result
+        if result.get("status") == "started":
+            started_count += 1
+        elif result.get("status") == "error":
+            error_count += 1
+
+    logger.info(f"Agent safety checks initiated: {started_count} started, {error_count} errors, {len(hosts) - started_count - error_count} already running")
+
+    return {"status": "ok", "results": results}
+
+
+@router.get("/api/hosts/warden/results", response_model=Dict[str, Any])
+async def get_warden_results_from_all_hosts():
+    """
+    Get combined warden check results:
+    - Liveness checks from orchestrator
+    - Safety checks from each agent
+    - Aggregated safety checks from orchestrator (e.g., UnifiedAgentVerifyFailedAggregated)
+    """
+    logger.debug("Fetching warden results from all hosts")
+
+    # Get orchestrator results (liveness + safety including aggregated checks)
+    orchestrator_result = orchestrator_warden_checker.get_last_result()
+    logger.debug(f"Orchestrator status: {orchestrator_result.get('status', 'unknown')}")
+
+    # Get safety results from all agents
+    agent_results = {}
+
+    async def get_safety_from_host(host):
+        try:
+            if is_local_host(host):
+                # Direct call to avoid HTTP deadlock
+                from ydb.tests.stability.nemesis_app.routers.agent_router import get_warden_result
+                result = await get_warden_result()
+                return host, result
+            else:
+                port = get_app_port()
+                loop = asyncio.get_running_loop()
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: requests.get(f"http://{host}:{port}/api/warden/result", timeout=10)
+                )
+                return host, resp.json()
+        except Exception as e:
+            logger.error(f"Failed to get warden result from {host}: {e}")
+            return host, {"status": "error", "error_message": str(e)}
+
+    tasks = [get_safety_from_host(host) for host in hosts]
+    task_results = await asyncio.gather(*tasks)
+
+    for host, result in task_results:
+        agent_results[host] = result
+
+    # Log summary of agent statuses
+    status_summary = {}
+    for host, result in agent_results.items():
+        status = result.get("status", "unknown")
+        status_summary[status] = status_summary.get(status, 0) + 1
+    logger.debug(f"Agent results summary: {status_summary}")
+
+    # Combine results: orchestrator liveness + agent safety per host
+    combined_results = {}
+
+    # Add orchestrator as a special entry with liveness checks and safety checks
+    combined_results["_orchestrator"] = {
+        "status": orchestrator_result.get("status", "idle"),
+        "started_at": orchestrator_result.get("started_at"),
+        "completed_at": orchestrator_result.get("completed_at"),
+        "liveness_checks": orchestrator_result.get("liveness_checks", []),
+        "safety_checks": orchestrator_result.get("safety_checks", []),  # PDisk checks + aggregated checks
+        "error_message": orchestrator_result.get("error_message")
+    }
+
+    # Add agent results (safety checks only)
+    for host, result in agent_results.items():
+        combined_results[host] = {
+            "status": result.get("status", "idle"),
+            "started_at": result.get("started_at"),
+            "completed_at": result.get("completed_at"),
+            "liveness_checks": [],  # Agents don't run liveness checks
+            "safety_checks": result.get("safety_checks", []),
+            "error_message": result.get("error_message")
+        }
+
+    return combined_results
+
+
+@router.get("/api/warden/checks", response_model=List[Dict[str, Any]])
+async def get_all_available_warden_checks():
+    """
+    Get list of all available warden checks across the system.
+
+    Returns checks from:
+    - Agent safety wardens (run on each agent)
+    - Orchestrator liveness wardens (run centrally)
+    - Orchestrator safety wardens (run centrally via HTTP)
+    """
+    return get_all_warden_definitions()

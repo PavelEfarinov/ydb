@@ -6,7 +6,7 @@ from six.moves.urllib import request
 
 
 class KikimrMonitor(object):
-    def __init__(self, host, mon_port, update_interval_seconds=1.0):
+    def __init__(self, host, mon_port, update_interval_seconds=1000.0):
         super(KikimrMonitor, self).__init__()
         self.__host = host
         self.__mon_port = mon_port
@@ -21,7 +21,7 @@ class KikimrMonitor(object):
         url = request.urlopen(
             "http://{host}:{mon_port}/viewer/json/tabletcounters?tablet_id={tablet_id}".format(
                 host=self.__host, mon_port=self.__mon_port, tablet_id=tablet_id
-            )
+            ), timeout=5
         )
         return json.load(url)
 
@@ -29,7 +29,7 @@ class KikimrMonitor(object):
     def pdisks(self):
         return tuple(self.__pdisks)
 
-    def fetch(self, deadline=60):
+    def fetch(self, deadline=1000):
         self.__update_if_required(force_update=True, deadline=deadline)
         return self
 
@@ -38,7 +38,7 @@ class KikimrMonitor(object):
             return
 
         try:
-            url = request.urlopen(self.__url)
+            url = request.urlopen(self.__url, timeout=5)
         except Exception:
             return False
         try:
