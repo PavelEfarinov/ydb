@@ -2,7 +2,6 @@ import argparse
 import json
 import logging
 import sys
-import uvicorn
 from ydb.tests.library.harness.kikimr_cluster import ExternalKiKiMRCluster
 from ydb.tests.stability.nemesis_app.internal.config import get_master_settings
 from ydb.tests.stability.nemesis_app.internal.install import get_hosts_from_yaml, install_on_hosts, stop_agent_services
@@ -40,7 +39,7 @@ def run_liveness_checks(settings):
     Run liveness checks synchronously and output JSON result to stdout.
 
     This function is designed to be called as a subprocess with timeout.
-    It runs the library wardens directly without FastAPI overhead.
+    It runs the library wardens directly without Flask overhead.
 
     Output format (JSON):
     {
@@ -182,12 +181,13 @@ def main():
 
     elif args.command == "run":
         # run the application
-        # workers=1 is important because we store state in memory
-        uvicorn.run(
-            "ydb.tests.stability.nemesis_app.app:app",
+        # threaded=True is important for concurrent request handling
+        from ydb.tests.stability.nemesis_app.app import app
+        app.run(
             host=settings.app_host,
             port=settings.app_port,
-            workers=1
+            threaded=True,
+            debug=False
         )
     else:
         raise ValueError(f"Unknown command: {args.command}")

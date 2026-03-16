@@ -1,13 +1,11 @@
-from contextlib import asynccontextmanager
 from functools import lru_cache
 import json
 import os
 
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
+from flask import Flask, jsonify
+
 from ydb.tests.stability.nemesis_app.internal import config
 from ydb.tests.stability.nemesis_app.internal.install import get_hosts_from_yaml
-from ydb.tests.library.stability.healthcheck.healthcheck_reporter import HealthCheckReporter
 from ydb.tests.stability.nemesis_app.internal.agent_warden_checker import AgentWardenChecker
 from ydb.tests.stability.nemesis_app.internal.orchestrator_warden_checker import OrchestratorWardenChecker
 
@@ -23,6 +21,7 @@ def get_settings():
 hosts = []
 healthcheck_reporter = None
 nemesis_config = {}
+app_initialized = False
 
 
 def load_nemesis_config():
@@ -40,9 +39,12 @@ def load_nemesis_config():
     return nemesis_config
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global hosts, healthcheck_reporter
+def initialize_app():
+    """Initialize application components (called on first request)"""
+    global hosts, healthcheck_reporter, app_initialized
+    if app_initialized:
+        return
+
     settings = get_settings()
 
     # Initialize agent WardenChecker (always, for both agent and orchestrator modes)
@@ -59,51 +61,77 @@ async def lifespan(app: FastAPI):
         load_nemesis_config()
 
         # Start healthcheck reporter
-        healthcheck_reporter = HealthCheckReporter(hosts, store_results=True)
-        healthcheck_reporter.start_healthchecks()
+        # healthcheck_reporter = HealthCheckReporter(hosts, store_results=True)
+        # healthcheck_reporter.start_healthchecks()
 
         # Share state with orchestrator router
         from ydb.tests.stability.nemesis_app.routers import orchestrator_router
         orchestrator_router.hosts = hosts
         orchestrator_router.orchestrator_warden_checker = OrchestratorWardenChecker(hosts=hosts, mon_port=orchestrator_router.mon_port)
 
-    yield
+    app_initialized = True
+
+
+def cleanup_app(exception=None):
+    """Cleanup application resources"""
+    global hosts, healthcheck_reporter
+    settings = get_settings()
 
     # Orchestrator-specific cleanup
     if settings.nemesis_type != 'agent':
         if healthcheck_reporter:
             healthcheck_reporter.stop_healthchecks()
 
-        # Cancel all scheduled tasks
+        # Stop all scheduled tasks
         from ydb.tests.stability.nemesis_app.routers import orchestrator_router
         for task_info in orchestrator_router.scheduled_tasks.values():
             if 'task' in task_info:
-                task_info['task'].cancel()
+                task_info['enabled'] = False
+                if 'thread' in task_info and task_info['thread'].is_alive():
+                    # Thread will exit on next iteration due to enabled=False
+                    pass
 
 
 def create_app():
     settings = get_settings()
-    app = FastAPI(lifespan=lifespan)
+    
+    # Configure static folder for orchestrator mode
+    static_folder = None
+    if settings.nemesis_type != 'agent':
+        static_folder = settings.static_location
+        print(f"Static files configured. Location: {settings.static_location}")
+        print(f"Nemesis type: {settings.nemesis_type}")
+    else:
+        print(f"Static files NOT configured. Nemesis type: {settings.nemesis_type}")
+    
+    app = Flask(__name__, static_folder=static_folder, static_url_path='/static')
+
+    # Register teardown handler
+    app.teardown_appcontext(cleanup_app)
 
     # Common health endpoint
-    @app.get("/health")
-    async def get_health():
-        return {"status": "ok"}
+    @app.route("/health", methods=["GET"])
+    def get_health():
+        return jsonify({"status": "ok"})
 
     # Always include agent router (available in both modes)
-    from ydb.tests.stability.nemesis_app.routers.agent_router import router as agent_router
-    app.include_router(agent_router)
+    from ydb.tests.stability.nemesis_app.routers.agent_router import blueprint as agent_blueprint
+    app.register_blueprint(agent_blueprint)
 
     # Include routers based on configuration
     if settings.nemesis_type == 'agent':
         # Agent mode: only agent endpoints
         print("Running in AGENT mode")
     else:
-        # Orchestrator mode: include orchestrator router and static files
-        from ydb.tests.stability.nemesis_app.routers.orchestrator_router import router as orchestrator_router
-        app.include_router(orchestrator_router)
-        app.mount("/static", StaticFiles(directory=settings.static_location), name="static")
+        # Orchestrator mode: include orchestrator router
+        from ydb.tests.stability.nemesis_app.routers.orchestrator_router import blueprint as orchestrator_blueprint
+        app.register_blueprint(orchestrator_blueprint)
         print("Running in ORCHESTRATOR mode (with agent endpoints)")
+
+    # Initialize on first request
+    @app.before_request
+    def ensure_initialized():
+        initialize_app()
 
     return app
 

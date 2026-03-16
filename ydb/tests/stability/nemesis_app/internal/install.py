@@ -101,7 +101,7 @@ RestartSec=10
 Environment=NEMESIS_USER=robot-nemesis
 Environment=NEMESIS_TYPE=master
 Environment=STATIC_LOCATION=/Berkanavt/nemesis/static
-Environment=APP_HOST={orchestrator_host}
+Environment=APP_HOST=::
 Environment=APP_PORT={settings.app_port}
 Environment=MON_HOST={settings.mon_port}
 {yaml_config_env}Type=simple
@@ -137,7 +137,7 @@ Restart=always
 RestartSec=10
 Environment=NEMESIS_USER=robot-nemesis
 Environment=NEMESIS_TYPE=agent
-Environment=APP_HOST={agent_settings.app_host}
+Environment=APP_HOST=::
 Environment=APP_PORT={agent_settings.app_port}
 Environment=MON_HOST={agent_settings.mon_port}
 Type=simple

@@ -28,7 +28,7 @@ PEERDIR(
     ydb/tests/library
     ydb/tests/library/stability
     ydb/tests/library/wardens
-    contrib/python/fastapi
+    contrib/python/Flask
 )
 
 END()

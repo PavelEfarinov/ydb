@@ -187,7 +187,21 @@ class AgentWardenChecker:
         try:
             # Run checks synchronously without creating a new event loop
             # This avoids deadlock when run_in_executor is called inside
-            safety_results = self._run_safety_checks_sync()
+            safety_results = []
+            
+            # Run checks with progress updates
+            for result in self._run_safety_checks_with_progress():
+                safety_results.append(result)
+                
+                # Update report with current progress
+                with self._lock:
+                    self._last_report = WardenCheckReport(
+                        status='running',
+                        started_at=self._last_report.started_at,
+                        completed_at=None,
+                        liveness_checks=[],  # Agent doesn't run liveness checks
+                        safety_checks=safety_results.copy()
+                    )
 
             # Count results by status
             ok_count = sum(1 for r in safety_results if r.status == 'ok')
@@ -223,10 +237,8 @@ class AgentWardenChecker:
                 )
                 self._is_running = False
 
-    def _run_safety_checks_sync(self) -> List[WardenCheckResult]:
-        """Run safety checks synchronously."""
-        results = []
-
+    def _run_safety_checks_with_progress(self) -> List[WardenCheckResult]:
+        """Run safety checks synchronously and yield results as they complete."""
         # Import existing wardens
         from ydb.tests.library.wardens.logs import (
             kikimr_start_logs_safety_warden_factory,
@@ -239,7 +251,7 @@ class AgentWardenChecker:
 
         # 1. Check kikimr.start logs for errors (GrepLogFileForMarkersSafetyWarden)
         logger.debug(f"[{self._hostname}] Running GrepLogFileForMarkersSafetyWarden")
-        result = self._run_warden_factory_sync(
+        for result in self._run_warden_factory_sync_with_progress(
             'GrepLogFileForMarkersSafetyWarden',
             lambda: kikimr_start_logs_safety_warden_factory(
                 local_hosts,
@@ -249,22 +261,22 @@ class AgentWardenChecker:
                 cut=True,
                 modification_days=1
             )
-        )
-        results.extend(result)
-        logger.debug(f"[{self._hostname}] GrepLogFileForMarkersSafetyWarden: {len(result)} checks")
+        ):
+            yield result
+        logger.debug(f"[{self._hostname}] GrepLogFileForMarkersSafetyWarden completed")
 
         # 2. Check dmesg for OOM (GrepDMesgForPatternsSafetyWarden)
         logger.debug(f"[{self._hostname}] Running GrepDMesgForPatternsSafetyWarden")
-        result = self._run_warden_factory_sync(
+        for result in self._run_warden_factory_sync_with_progress(
             'GrepDMesgForPatternsSafetyWarden',
             lambda: kikimr_grep_dmesg_safety_warden_factory(
                 local_hosts,
                 ssh_username=self._ssh_username,
                 lines_after=5
             )
-        )
-        results.extend(result)
-        logger.debug(f"[{self._hostname}] GrepDMesgForPatternsSafetyWarden: {len(result)} checks")
+        ):
+            yield result
+        logger.debug(f"[{self._hostname}] GrepDMesgForPatternsSafetyWarden completed")
 
         # 3. Check unified_agent for VERIFY failed errors
         logger.debug(f"[{self._hostname}] Running UnifiedAgentVerifyFailedSafetyWarden")
@@ -272,18 +284,19 @@ class AgentWardenChecker:
             'UnifiedAgentVerifyFailedSafetyWarden',
             lambda: UnifiedAgentVerifyFailedSafetyWarden(hours_back=24)
         )
-        results.append(result)
+        yield result
         logger.debug(f"[{self._hostname}] UnifiedAgentVerifyFailedSafetyWarden: status={result.status}")
 
-        return results
+    def _run_safety_checks_sync(self) -> List[WardenCheckResult]:
+        """Run safety checks synchronously (legacy method for compatibility)."""
+        return list(self._run_safety_checks_with_progress())
 
-    def _run_warden_factory_sync(
+    def _run_warden_factory_sync_with_progress(
         self,
         factory_name: str,
         factory_fn: Callable
     ) -> List[WardenCheckResult]:
-        """Run a warden factory and return results for all wardens it creates."""
-        results = []
+        """Run a warden factory and yield results as each warden completes."""
         try:
             wardens = factory_fn()
             for warden in wardens:
@@ -291,33 +304,43 @@ class AgentWardenChecker:
                 try:
                     violations = warden.list_of_safety_violations()
                     status = 'violation' if violations else 'ok'
-                    results.append(WardenCheckResult(
+                    result = WardenCheckResult(
                         name=warden_name,
                         category='safety',
                         violations=violations if violations else [],
                         status=status
-                    ))
+                    )
+                    yield result
                     if violations:
                         logger.info(f"[{self._hostname}] {warden_name}: {len(violations)} violation(s) found")
                 except Exception as e:
                     logger.error(f"[{self._hostname}] {warden_name}: error - {e}")
-                    results.append(WardenCheckResult(
+                    result = WardenCheckResult(
                         name=warden_name,
                         category='safety',
                         violations=[],
                         status='error',
                         error_message=str(e)
-                    ))
+                    )
+                    yield result
         except Exception as e:
             logger.error(f"[{self._hostname}] {factory_name}: factory error - {e}")
-            results.append(WardenCheckResult(
+            result = WardenCheckResult(
                 name=factory_name,
                 category='safety',
                 violations=[],
                 status='error',
                 error_message=str(e)
-            ))
-        return results
+            )
+            yield result
+
+    def _run_warden_factory_sync(
+        self,
+        factory_name: str,
+        factory_fn: Callable
+    ) -> List[WardenCheckResult]:
+        """Run a warden factory and return results for all wardens it creates."""
+        return list(self._run_warden_factory_sync_with_progress(factory_name, factory_fn))
 
     def _run_single_warden_sync(
         self,

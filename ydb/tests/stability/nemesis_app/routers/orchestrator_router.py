@@ -1,12 +1,14 @@
-import asyncio
 import logging
 import socket
-from typing import List, Dict, Any
+import threading
+import time
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
-from fastapi import APIRouter
+from flask import Blueprint, request, jsonify
+
 from ydb.tests.stability.nemesis_app.internal.defaults import PROCESS_TYPES
-from ydb.tests.stability.nemesis_app.internal.models import ProcessInfo, SetScheduleRequest, CreateHostProcessRequest
 from ydb.tests.stability.nemesis_app.internal.orchestrator_warden_checker import (
     OrchestratorWardenChecker,
     get_all_warden_definitions,
@@ -16,7 +18,7 @@ from ydb.tests.stability.nemesis_app.internal.orchestrator_warden_checker import
 logger = logging.getLogger(__name__)
 
 
-router = APIRouter()
+blueprint = Blueprint('orchestrator', __name__)
 
 # Module-level state
 hosts = []
@@ -24,6 +26,7 @@ scheduled_tasks = {}
 scheduled_executions_history = []  # List of {type, action, host, timestamp}
 mon_port = 8765  # Default monitoring port
 orchestrator_warden_checker: OrchestratorWardenChecker = None  # initialized in app.py
+scheduled_tasks_lock = threading.Lock()
 
 
 def get_app_port() -> int:
@@ -55,45 +58,45 @@ def is_local_host(host: str) -> bool:
         return False
 
 
-async def run_process_on_host(host, process_type, action='run', track_history=False):
+def run_process_on_host(host, process_type, action='run', track_history=False):
     """Run process on host, using direct call if it's the local host to avoid deadlock"""
     try:
         # Check if this is a call to ourselves
         if is_local_host(host):
             # Direct call to avoid HTTP deadlock with single worker
-            from ydb.tests.stability.nemesis_app.routers.agent_router import create_process
-            from ydb.tests.stability.nemesis_app.internal.models import CreateProcessRequest
+            from ydb.tests.stability.nemesis_app.routers.agent_router import create_process_helper
 
-            req = CreateProcessRequest(type=process_type, action=action)
-            result = await create_process(req)
+            # Call the helper function directly
+            result = create_process_helper(process_type, action)
             print(f"Started process {process_type} locally with action {action}: {result}")
         else:
             # Remote call via HTTP
             port = get_app_port()
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, lambda: requests.post(f"http://{host}:{port}/api/processes", json={'type': process_type, 'action': action}, timeout=5))
+            requests.post(f"http://{host}:{port}/api/processes", json={'type': process_type, 'action': action}, timeout=5)
 
         # Track in history if requested (for scheduled executions)
         if track_history:
             from datetime import datetime
-            scheduled_executions_history.append({
-                "type": process_type,
-                "action": action,
-                "host": host,
-                "timestamp": datetime.utcnow().isoformat() + "Z"
-            })
-            # Keep only last 50 entries
-            if len(scheduled_executions_history) > 50:
-                scheduled_executions_history.pop(0)
+            with scheduled_tasks_lock:
+                scheduled_executions_history.append({
+                    "type": process_type,
+                    "action": action,
+                    "host": host,
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                })
+                # Keep only last 50 entries
+                if len(scheduled_executions_history) > 50:
+                    scheduled_executions_history.pop(0)
 
     except Exception as e:
         print(f"Failed to start process {process_type} on {host}: {e}")
 
 
-async def schedule_process(process_type: str, nemesis_config: dict, custom_interval: int = None):
+def schedule_process(process_type: str, nemesis_config: dict, custom_interval: int = None):
     while True:
-        if process_type not in scheduled_tasks or not scheduled_tasks[process_type]['enabled']:
-            break
+        with scheduled_tasks_lock:
+            if process_type not in scheduled_tasks or not scheduled_tasks[process_type]['enabled']:
+                break
 
         # Get config for this process type
         p_config = nemesis_config.get(process_type, {})
@@ -108,79 +111,96 @@ async def schedule_process(process_type: str, nemesis_config: dict, custom_inter
             action, target_hosts = runner.prepare_fault(hosts, p_config)
 
             if action and target_hosts:
-                tasks = []
-                for host in target_hosts:
-                    tasks.append(run_process_on_host(host, process_type, action=action, track_history=True))
+                # Run processes on hosts in parallel using thread pool
+                with ThreadPoolExecutor(max_workers=min(len(target_hosts), 10)) as executor:
+                    futures = [
+                        executor.submit(run_process_on_host, host, process_type, action, True)
+                        for host in target_hosts
+                    ]
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except Exception as e:
+                            print(f"Error in scheduled task: {e}")
 
-                if tasks:
-                    await asyncio.gather(*tasks)
-
-        await asyncio.sleep(interval)
+        time.sleep(interval)
 
 
-@router.get("/api/hosts/{host}/processes", response_model=List[ProcessInfo])
-async def get_all_host_processes(host: str):
+@blueprint.route("/api/hosts/<host>/processes", methods=["GET"])
+def get_all_host_processes(host: str):
     if is_local_host(host):
         # Direct call to avoid HTTP deadlock
-        from ydb.tests.stability.nemesis_app.routers.agent_router import get_all_processes
-        return await get_all_processes()
+        from ydb.tests.stability.nemesis_app.routers.agent_router import get_all_processes_helper
+        return jsonify(get_all_processes_helper())
     else:
         port = get_app_port()
-        return requests.get(f"http://{host}:{port}/api/processes").json()
+        resp = requests.get(f"http://{host}:{port}/api/processes")
+        return jsonify(resp.json())
 
 
-async def fetch_host_processes(host):
+def fetch_host_processes(host):
     try:
         if is_local_host(host):
             # Direct call to avoid HTTP deadlock
-            from ydb.tests.stability.nemesis_app.routers.agent_router import get_all_processes
-            return host, await get_all_processes()
+            from ydb.tests.stability.nemesis_app.routers.agent_router import get_all_processes_helper
+            return host, get_all_processes_helper()
         else:
             port = get_app_port()
-            loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(None, lambda: requests.get(f"http://{host}:{port}/api/processes", timeout=5))
+            resp = requests.get(f"http://{host}:{port}/api/processes", timeout=5)
             return host, resp.json()
     except Exception as e:
         print(f"Failed to fetch processes from {host}: {e}")
         return host, []
 
 
-@router.get("/api/hosts/processes", response_model=Dict[str, List[ProcessInfo]])
-async def get_all_processes():
-    tasks = [fetch_host_processes(host) for host in hosts]
-    results = await asyncio.gather(*tasks)
-    return {host: procs for host, procs in results}
+@blueprint.route("/api/hosts/processes", methods=["GET"])
+def get_all_processes():
+    with ThreadPoolExecutor(max_workers=min(len(hosts), 10)) as executor:
+        futures = [executor.submit(fetch_host_processes, host) for host in hosts]
+        results = {}
+        for future in as_completed(futures):
+            host, procs = future.result()
+            results[host] = procs
+    return jsonify(results)
 
 
-@router.post("/api/hosts/process", response_model=Dict[str, Any])
-async def create_host_process(req: CreateHostProcessRequest):
-    if req.type not in PROCESS_TYPES:
-        return {"status": "error", "message": "Invalid process type"}
-    if req.host not in hosts:
-        return {"status": "error", "message": "Invalid host"}
+@blueprint.route("/api/hosts/process", methods=["POST"])
+def create_host_process():
+    data = request.get_json()
+    if not data:
+        return jsonify({"status": "error", "message": "No data provided"}), 400
+    
+    process_type = data.get("type")
+    host = data.get("host")
+    action = data.get("action", "inject")
+    
+    if not process_type:
+        return jsonify({"status": "error", "message": "Missing type field"}), 400
+    if not host:
+        return jsonify({"status": "error", "message": "Missing host field"}), 400
+    
+    if process_type not in PROCESS_TYPES:
+        return jsonify({"status": "error", "message": "Invalid process type"}), 400
+    if host not in hosts:
+        return jsonify({"status": "error", "message": "Invalid host"}), 400
 
     # Check if this nemesis type is currently scheduled
-    if req.type in scheduled_tasks and scheduled_tasks[req.type].get('enabled', False):
-        return {"status": "error", "message": f"Cannot manually run {req.type}: it is currently scheduled. Disable scheduling first."}
+    with scheduled_tasks_lock:
+        if process_type in scheduled_tasks and scheduled_tasks[process_type].get('enabled', False):
+            return jsonify({"status": "error", "message": f"Cannot manually run {process_type}: it is currently scheduled. Disable scheduling first."}), 400
 
     try:
-        action = req.action if req.action else 'inject'
-
-        if is_local_host(req.host):
+        if is_local_host(host):
             # Direct call to avoid HTTP deadlock
-            from ydb.tests.stability.nemesis_app.routers.agent_router import create_process
-            from ydb.tests.stability.nemesis_app.internal.models import CreateProcessRequest
-
-            process_req = CreateProcessRequest(type=req.type, action=action)
-            result = await create_process(process_req)
-            return result
+            from ydb.tests.stability.nemesis_app.routers.agent_router import create_process_helper
+            result = create_process_helper(process_type, action)
+            return jsonify(result)
         else:
             port = get_app_port()
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, lambda: requests.post(f"http://{req.host}:{port}/api/processes", json={'type': req.type, 'action': action}, timeout=5))
-            return {"status": "ok"}
+            requests.post(f"http://{host}:{port}/api/processes", json={'type': process_type, 'action': action}, timeout=5)
+            return jsonify({"status": "ok"})
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # Nemesis group definitions
@@ -220,8 +240,8 @@ def get_nemesis_group(nemesis_name: str) -> str:
     return "Other"
 
 
-@router.get("/api/process_types")
-async def get_process_types():
+@blueprint.route("/api/process_types", methods=["GET"])
+def get_process_types():
     """Return process types with their descriptions"""
     result = []
     for name, definition in PROCESS_TYPES.items():
@@ -231,11 +251,11 @@ async def get_process_types():
             "name": name,
             "description": description
         })
-    return result
+    return jsonify(result)
 
 
-@router.get("/api/process_types/grouped")
-async def get_process_types_grouped():
+@blueprint.route("/api/process_types/grouped", methods=["GET"])
+def get_process_types_grouped():
     """Return process types grouped by category with descriptions"""
     groups = {}
 
@@ -264,11 +284,11 @@ async def get_process_types_grouped():
     # Remove empty groups
     groups = {k: v for k, v in groups.items() if v["nemesis"]}
 
-    return groups
+    return jsonify(groups)
 
 
-@router.get("/api/hosts/health", response_model=Dict[str, Any])
-async def get_hosts_health():
+@blueprint.route("/api/hosts/health", methods=["GET"])
+def get_hosts_health():
     aggregated_health = {}
     for host in hosts:
         try:
@@ -281,80 +301,103 @@ async def get_hosts_health():
                 aggregated_health[host] = resp.json()
         except Exception as e:
             aggregated_health[host] = {"status": "error", "message": str(e)}
-    return aggregated_health
+    return jsonify(aggregated_health)
 
 
-@router.post("/api/schedule", response_model=Dict[str, Any])
-async def set_schedule(req: SetScheduleRequest):
-    if req.type not in PROCESS_TYPES:
-        return {"status": "error", "message": "Invalid process type"}
+@blueprint.route("/api/schedule", methods=["POST"])
+def set_schedule():
+    data = request.get_json()
+    if not data:
+        return jsonify({"status": "error", "message": "No data provided"}), 400
+    
+    process_type = data.get("type")
+    enabled = data.get("enabled")
+    interval = data.get("interval")
+    
+    if not process_type:
+        return jsonify({"status": "error", "message": "Missing type field"}), 400
+    if enabled is None:
+        return jsonify({"status": "error", "message": "Missing enabled field"}), 400
+    
+    if process_type not in PROCESS_TYPES:
+        return jsonify({"status": "error", "message": "Invalid process type"}), 400
 
     # Import here to get the current nemesis_config
     from ydb.tests.stability.nemesis_app.app import nemesis_config
 
-    if req.enabled:
-        if req.type in scheduled_tasks and scheduled_tasks[req.type]['enabled']:
-            return {"status": "ok", "message": "Already enabled"}
+    with scheduled_tasks_lock:
+        if enabled:
+            if process_type in scheduled_tasks and scheduled_tasks[process_type]['enabled']:
+                return jsonify({"status": "ok", "message": "Already enabled"})
 
-        scheduled_tasks[req.type] = {
-            'enabled': True,
-            'interval': req.interval
-        }
-        task = asyncio.create_task(schedule_process(req.type, nemesis_config, req.interval))
-        scheduled_tasks[req.type]['task'] = task
-    else:
-        if req.type in scheduled_tasks:
-            scheduled_tasks[req.type]['enabled'] = False
-            if 'task' in scheduled_tasks[req.type]:
-                scheduled_tasks[req.type]['task'].cancel()
-            del scheduled_tasks[req.type]
+            scheduled_tasks[process_type] = {
+                'enabled': True,
+                'interval': interval
+            }
+            # Start scheduling in a daemon thread
+            thread = threading.Thread(
+                target=schedule_process,
+                args=(process_type, nemesis_config, interval)
+            )
+            thread.daemon = True
+            thread.start()
+            scheduled_tasks[process_type]['thread'] = thread
+        else:
+            if process_type in scheduled_tasks:
+                scheduled_tasks[process_type]['enabled'] = False
+                if 'thread' in scheduled_tasks[process_type]:
+                    # Thread will exit on next iteration due to enabled=False
+                    pass
+                del scheduled_tasks[process_type]
 
-    return {"status": "ok"}
+    return jsonify({"status": "ok"})
 
 
-@router.get("/api/schedule")
-async def get_schedule():
+@blueprint.route("/api/schedule", methods=["GET"])
+def get_schedule():
     """Return schedule status with intervals"""
     result = {}
-    for pt in PROCESS_TYPES:
-        if pt in scheduled_tasks and scheduled_tasks[pt]['enabled']:
-            result[pt] = {
-                "enabled": True,
-                "interval": scheduled_tasks[pt].get('interval')
-            }
-        else:
-            result[pt] = {"enabled": False, "interval": None}
-    return result
+    with scheduled_tasks_lock:
+        for pt in PROCESS_TYPES:
+            if pt in scheduled_tasks and scheduled_tasks[pt]['enabled']:
+                result[pt] = {
+                    "enabled": True,
+                    "interval": scheduled_tasks[pt].get('interval')
+                }
+            else:
+                result[pt] = {"enabled": False, "interval": None}
+    return jsonify(result)
 
 
-@router.get("/api/schedule/history")
-async def get_schedule_history():
+@blueprint.route("/api/schedule/history", methods=["GET"])
+def get_schedule_history():
     """Return last scheduled executions"""
-    # Return last 5 in reverse order (newest first)
-    return scheduled_executions_history[-15:][::-1]
+    with scheduled_tasks_lock:
+        # Return last 15 in reverse order (newest first)
+        return jsonify(scheduled_executions_history[-15:][::-1])
 
 
-@router.get("/api/healthcheck", response_model=Dict[str, Any])
-async def get_healthcheck():
+@blueprint.route("/api/healthcheck", methods=["GET"])
+def get_healthcheck():
     # Import here to get the current healthcheck_reporter
     from ydb.tests.stability.nemesis_app.app import healthcheck_reporter
 
     if healthcheck_reporter:
-        return healthcheck_reporter.last_results
-    return {}
+        return jsonify(healthcheck_reporter.last_results)
+    return jsonify({})
 
 
-@router.post("/api/config/reload", response_model=Dict[str, Any])
-async def reload_config():
+@blueprint.route("/api/config/reload", methods=["POST"])
+def reload_config():
     # Import here to get the load function
     from ydb.tests.stability.nemesis_app.app import load_nemesis_config
 
     config = load_nemesis_config()
-    return {"status": "ok", "config": config}
+    return jsonify({"status": "ok", "config": config})
 
 
-@router.post("/api/hosts/warden/start", response_model=Dict[str, Any])
-async def start_warden_checks_on_all_hosts():
+@blueprint.route("/api/hosts/warden/start", methods=["POST"])
+def start_warden_checks_on_all_hosts():
     """
     Start warden checks:
     - Liveness checks run centrally on master (HTTP monitoring)
@@ -365,7 +408,21 @@ async def start_warden_checks_on_all_hosts():
 
     # 1. Start orchestrator checks (liveness + orchestrator safety)
     logger.info("Starting orchestrator warden checks (liveness + PDisk + aggregated)")
-    orchestrator_started = await orchestrator_warden_checker.start_checks()
+    
+    # Handle async method in sync context
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If there's already a running loop, create a new one
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, orchestrator_warden_checker.start_checks())
+                orchestrator_started = future.result()
+        else:
+            orchestrator_started = asyncio.run(orchestrator_warden_checker.start_checks())
+    except RuntimeError:
+        # No event loop, create one
+        orchestrator_started = asyncio.run(orchestrator_warden_checker.start_checks())
+    
     results["master"] = {
         "status": "started" if orchestrator_started else "already_running",
         "type": "liveness"
@@ -373,22 +430,18 @@ async def start_warden_checks_on_all_hosts():
     logger.info(f"Orchestrator checks: {'started' if orchestrator_started else 'already running'}")
 
     # 2. Start safety checks on all agents
-    async def start_safety_on_host(host):
+    def start_safety_on_host(host):
         try:
             logger.debug(f"Starting safety checks on agent: {host}")
             if is_local_host(host):
                 # Direct call to avoid HTTP deadlock
-                from ydb.tests.stability.nemesis_app.routers.agent_router import start_warden_checks
-                result = await start_warden_checks()
+                from ydb.tests.stability.nemesis_app.routers.agent_router import start_warden_checks_helper
+                result = start_warden_checks_helper()
                 logger.debug(f"Agent {host} (local): {result.get('status', 'unknown')}")
                 return host, result
             else:
                 port = get_app_port()
-                loop = asyncio.get_running_loop()
-                resp = await loop.run_in_executor(
-                    None,
-                    lambda: requests.post(f"http://{host}:{port}/api/warden/start", timeout=10)
-                )
+                resp = requests.post(f"http://{host}:{port}/api/warden/start", timeout=10)
                 result = resp.json()
                 logger.debug(f"Agent {host} (remote): {result.get('status', 'unknown')}")
                 return host, result
@@ -396,25 +449,25 @@ async def start_warden_checks_on_all_hosts():
             logger.error(f"Failed to start safety checks on agent {host}: {e}")
             return host, {"status": "error", "message": str(e)}
 
-    tasks = [start_safety_on_host(host) for host in hosts]
-    task_results = await asyncio.gather(*tasks)
-
-    started_count = 0
-    error_count = 0
-    for host, result in task_results:
-        results["agents"][host] = result
-        if result.get("status") == "started":
-            started_count += 1
-        elif result.get("status") == "error":
-            error_count += 1
+    with ThreadPoolExecutor(max_workers=min(len(hosts), 10)) as executor:
+        futures = [executor.submit(start_safety_on_host, host) for host in hosts]
+        started_count = 0
+        error_count = 0
+        for future in as_completed(futures):
+            host, result = future.result()
+            results["agents"][host] = result
+            if result.get("status") == "started":
+                started_count += 1
+            elif result.get("status") == "error":
+                error_count += 1
 
     logger.info(f"Agent safety checks initiated: {started_count} started, {error_count} errors, {len(hosts) - started_count - error_count} already running")
 
-    return {"status": "ok", "results": results}
+    return jsonify({"status": "ok", "results": results})
 
 
-@router.get("/api/hosts/warden/results", response_model=Dict[str, Any])
-async def get_warden_results_from_all_hosts():
+@blueprint.route("/api/hosts/warden/results", methods=["GET"])
+def get_warden_results_from_all_hosts():
     """
     Get combined warden check results:
     - Liveness checks from orchestrator
@@ -430,30 +483,26 @@ async def get_warden_results_from_all_hosts():
     # Get safety results from all agents
     agent_results = {}
 
-    async def get_safety_from_host(host):
+    def get_safety_from_host(host):
         try:
             if is_local_host(host):
                 # Direct call to avoid HTTP deadlock
-                from ydb.tests.stability.nemesis_app.routers.agent_router import get_warden_result
-                result = await get_warden_result()
+                from ydb.tests.stability.nemesis_app.routers.agent_router import get_warden_result_helper
+                result = get_warden_result_helper()
                 return host, result
             else:
                 port = get_app_port()
-                loop = asyncio.get_running_loop()
-                resp = await loop.run_in_executor(
-                    None,
-                    lambda: requests.get(f"http://{host}:{port}/api/warden/result", timeout=10)
-                )
+                resp = requests.get(f"http://{host}:{port}/api/warden/result", timeout=10)
                 return host, resp.json()
         except Exception as e:
             logger.error(f"Failed to get warden result from {host}: {e}")
             return host, {"status": "error", "error_message": str(e)}
 
-    tasks = [get_safety_from_host(host) for host in hosts]
-    task_results = await asyncio.gather(*tasks)
-
-    for host, result in task_results:
-        agent_results[host] = result
+    with ThreadPoolExecutor(max_workers=min(len(hosts), 10)) as executor:
+        futures = [executor.submit(get_safety_from_host, host) for host in hosts]
+        for future in as_completed(futures):
+            host, result = future.result()
+            agent_results[host] = result
 
     # Log summary of agent statuses
     status_summary = {}
@@ -486,11 +535,11 @@ async def get_warden_results_from_all_hosts():
             "error_message": result.get("error_message")
         }
 
-    return combined_results
+    return jsonify(combined_results)
 
 
-@router.get("/api/warden/checks", response_model=List[Dict[str, Any]])
-async def get_all_available_warden_checks():
+@blueprint.route("/api/warden/checks", methods=["GET"])
+def get_all_available_warden_checks():
     """
     Get list of all available warden checks across the system.
 
@@ -499,4 +548,4 @@ async def get_all_available_warden_checks():
     - Orchestrator liveness wardens (run centrally)
     - Orchestrator safety wardens (run centrally via HTTP)
     """
-    return get_all_warden_definitions()
+    return jsonify(get_all_warden_definitions())

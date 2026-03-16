@@ -209,7 +209,7 @@ class OrchestratorWardenChecker:
         return True
 
     def _run_checks_sync(self):
-        """Run checks synchronously."""
+        """Run checks synchronously with progress updates."""
         start_time = datetime.utcnow()
         logger.info("Orchestrator warden checks execution started")
 
@@ -221,19 +221,49 @@ class OrchestratorWardenChecker:
             safety_results = []
 
             if cluster is not None:
+                # Run liveness checks with progress updates
                 logger.debug("Running liveness checks...")
-                liveness_results = self._run_liveness_checks_sync()
+                for result in self._run_liveness_checks_with_progress():
+                    liveness_results.append(result)
+                    # Update report with current progress
+                    with self._lock:
+                        self._last_report = WardenCheckReport(
+                            status='running',
+                            started_at=self._last_report.started_at,
+                            completed_at=None,
+                            liveness_checks=liveness_results.copy(),
+                            safety_checks=safety_results.copy()
+                        )
                 logger.debug(f"Liveness checks completed: {len(liveness_results)} checks")
 
                 # PDisk check also uses HTTP, run it here
                 logger.debug("Running PDisk safety check...")
-                safety_results = self._run_pdisk_check_sync(cluster)
+                for result in self._run_pdisk_check_with_progress(cluster):
+                    safety_results.append(result)
+                    # Update report with current progress
+                    with self._lock:
+                        self._last_report = WardenCheckReport(
+                            status='running',
+                            started_at=self._last_report.started_at,
+                            completed_at=None,
+                            liveness_checks=liveness_results.copy(),
+                            safety_checks=safety_results.copy()
+                        )
                 logger.debug(f"PDisk check completed: {len(safety_results)} checks")
 
                 # Run aggregated VERIFY failed check
                 logger.debug("Running aggregated VERIFY failed check...")
                 aggregated_result = self._run_aggregated_verify_failed_check_sync()
                 safety_results.append(aggregated_result)
+                # Update report with current progress
+                with self._lock:
+                    self._last_report = WardenCheckReport(
+                        status='running',
+                        started_at=self._last_report.started_at,
+                        completed_at=None,
+                        liveness_checks=liveness_results.copy(),
+                        safety_checks=safety_results.copy()
+                    )
                 logger.debug(f"Aggregated VERIFY failed check completed: status={aggregated_result.status}")
 
             # Count results by status
@@ -387,6 +417,19 @@ class OrchestratorWardenChecker:
                 status='error',
                 error_message=str(e)
             )]
+
+    def _run_liveness_checks_with_progress(self, timeout_seconds: int = 60) -> List[WardenCheckResult]:
+        """Run liveness checks via subprocess with timeout and yield results."""
+        # Since subprocess runs as a single unit, we can't show progress during execution
+        # But we can yield results as soon as they're available
+        for result in self._run_liveness_checks_sync(timeout_seconds):
+            yield result
+
+    def _run_pdisk_check_with_progress(self, cluster) -> List[WardenCheckResult]:
+        """Run PDisk state check and yield results."""
+        # Since this is a single check, we just yield the result
+        for result in self._run_pdisk_check_sync(cluster):
+            yield result
 
     def _run_pdisk_check_sync(self, cluster) -> List[WardenCheckResult]:
         """Run PDisk state check."""
