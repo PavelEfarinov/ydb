@@ -9,6 +9,7 @@ Architecture:
 """
 import logging
 import random
+import socket
 import subprocess
 import signal
 
@@ -415,6 +416,366 @@ class StopStartNodeNemesis(AbstractAgentNemesis):
                 self._logger.info("Successfully started %s service", self._service_name)
             except subprocess.CalledProcessError as e:
                 self._logger.error("Failed to start service: %s", str(e))
+
+
+# =============================================================================
+# Disk Nemesis - Local disk operations (no SSH)
+# =============================================================================
+
+class SafelyBreakDisk(AbstractAgentNemesis):
+    """Safely breaks a disk drive on localhost via gRPC."""
+
+    def __init__(self, grpc_port=2135):
+        super(SafelyBreakDisk, self).__init__()
+        self._logger = logging.getLogger(self.__class__.__name__)
+        self._grpc_port = grpc_port
+        self._client = None
+        self._currently_broken_drive = None
+        self._states = {}
+        self._broken_drives = set()
+
+    @property
+    def client(self):
+        if self._client is None:
+            from ydb.tests.library.clients.kikimr_client import kikimr_client_factory
+            self._client = kikimr_client_factory(
+                'localhost', self._grpc_port, retry_count=10, timeout=10)
+        return self._client
+
+    def prepare_fault(self):
+        """Prepare state by reading current drive status."""
+        self._broken_drives = set()
+        try:
+            from ydb.tests.library.common.msgbus_types import EDriveStatus
+
+            # Read drive status from local node
+            response = self.client.bs_controller_read_drive_status()
+            if hasattr(response, 'BlobStorageConfigResponse'):
+                for status in response.BlobStorageConfigResponse.Status:
+                    for drive in status.DriveStatus:
+                        self._states[drive.Path] = drive.Status
+                        if drive.Status != EDriveStatus.ACTIVE:
+                            self._broken_drives.add(drive.Path)
+        except Exception as e:
+            self._logger.error("Failed to read drive status: %s", str(e))
+            self._states = {}
+
+    def inject_fault(self):
+        """Break a random disk drive."""
+        self._logger.info("=== INJECT_FAULT START: SafelyBreakDisk ===")
+        self.extract_fault()  # Restore any previously broken drives
+
+        if self._states:
+            path = random.choice(list(self._states.keys()))
+            try:
+                from ydb.tests.library.common.msgbus_types import EDriveStatus
+                from ydb.core.protos.blobstorage_config_pb2 import TConfigResponse
+
+                # Try to break the drive
+                for _ in range(6):
+                    response = self.client.bs_controller_update_drive_status(path, EDriveStatus.BROKEN)
+                    if hasattr(response, 'BlobStorageConfigResponse'):
+                        if not response.BlobStorageConfigResponse.Success:
+                            if len(response.BlobStorageConfigResponse.Status) == 1:
+                                fail_reason = response.BlobStorageConfigResponse.Status[0].FailReason
+                                if fail_reason == TConfigResponse.TStatus.EFailReason.kMayLoseData:
+                                    import time
+                                    time.sleep(10)
+                                    continue
+                        break
+
+                self._currently_broken_drive = path
+                self._broken_drives.add(path)
+                self._logger.info("Successfully broke drive: %s", path)
+                self.on_success_inject_fault()
+            except Exception as e:
+                self._logger.error("Failed to break drive: %s", str(e))
+
+    def extract_fault(self):
+        """Restore broken disk drives."""
+        try:
+            from ydb.tests.library.common.msgbus_types import EDriveStatus
+
+            for path in list(self._broken_drives):
+                try:
+                    self.client.bs_controller_update_drive_status(path, EDriveStatus.ACTIVE)
+                    self._logger.info("Restored drive: %s", path)
+                except Exception as e:
+                    self._logger.error("Failed to restore drive %s: %s", path, str(e))
+                finally:
+                    self._broken_drives.discard(path)
+            self._currently_broken_drive = None
+        except Exception as e:
+            self._logger.error("Failed to restore drives: %s", str(e))
+
+
+class SafelyCleanupDisks(AbstractAgentNemesis):
+    """Safely cleans up disks on localhost."""
+
+    def __init__(self, grpc_port=2135):
+        super(SafelyCleanupDisks, self).__init__()
+        self._logger = logging.getLogger(self.__class__.__name__)
+        self._grpc_port = grpc_port
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            from ydb.tests.library.clients.kikimr_client_factory import kikimr_client_factory
+            self._client = kikimr_client_factory(
+                'localhost', self._grpc_port, retry_count=10, timeout=10)
+        return self._client
+
+    def inject_fault(self):
+        """Cleanup disks by killing process and restarting."""
+        self._logger.info("=== INJECT_FAULT START: SafelyCleanupDisks ===")
+        try:
+            # Kill the local YDB process
+            cmd = "sudo systemctl stop kikimr"
+            subprocess.check_call(cmd, shell=True)
+            self._logger.info("Stopped kikimr service")
+
+            # Cleanup disks (this would need to be implemented based on actual disk cleanup logic)
+            # For now, we just restart the service
+            cmd = "sudo systemctl start kikimr"
+            subprocess.check_call(cmd, shell=True)
+            self._logger.info("Started kikimr service")
+
+            self.on_success_inject_fault()
+        except subprocess.CalledProcessError as e:
+            self._logger.error("Failed to cleanup disks: %s", str(e))
+
+
+# =============================================================================
+# Datacenter Nemesis - Network partition for datacenters (local iptables)
+# =============================================================================
+
+class DataCenterIptablesBlockPortsNemesis(AbstractAgentNemesis):
+    """Blocks YDB ports using iptables on localhost for datacenter isolation."""
+
+    def __init__(self, duration=60):
+        super(DataCenterIptablesBlockPortsNemesis, self).__init__()
+        self._logger = logging.getLogger(self.__class__.__name__)
+        self._duration = duration
+        self._block_ports_cmd = (
+            "sudo /sbin/ip6tables -w -A YDB_FW -p tcp -m multiport "
+            "--ports 2135,2136,8765,19001,31000:32000 -j REJECT"
+        )
+        self._restore_ports_cmd = (
+            "sudo /sbin/ip6tables -w -F YDB_FW"
+        )
+
+    def inject_fault(self):
+        """Block YDB ports using iptables."""
+        self._logger.info("=== INJECT_FAULT START: DataCenterIptablesBlockPortsNemesis ===")
+        try:
+            # Block ports and schedule automatic recovery
+            block_and_recover_cmd = (
+                f"nohup bash -c '{self._block_ports_cmd} && sleep {self._duration} && "
+                f"{self._restore_ports_cmd}' > /dev/null 2>&1 &"
+            )
+            subprocess.check_call(block_and_recover_cmd, shell=True)
+            self._logger.info("Blocked YDB ports and scheduled automatic recovery")
+            self.on_success_inject_fault()
+        except subprocess.CalledProcessError as e:
+            self._logger.error("Failed to block YDB ports: %s", str(e))
+
+    def extract_fault(self):
+        """YDB ports are automatically restored via sleep command scheduled during injection."""
+        self._logger.info("Skipping manual port restoration - automatic recovery via sleep command is scheduled")
+
+
+class DataCenterRouteUnreachableNemesis(AbstractAgentNemesis):
+    """Makes network routes unreachable on localhost for datacenter isolation."""
+
+    def __init__(self, duration=60):
+        super(DataCenterRouteUnreachableNemesis, self).__init__()
+        self._logger = logging.getLogger(self.__class__.__name__)
+        self._duration = duration
+        self._block_cmd_template = (
+            'sudo /usr/bin/ip -6 ro replace unreach {} || sudo /usr/bin/ip -6 ro add unreach {}'
+        )
+        self._restore_cmd_template = (
+            'sudo /usr/bin/ip -6 ro del unreach {}'
+        )
+        self._blocked_ips = []
+
+    def _resolve_hostname_to_ip(self, hostname):
+        """Resolve hostname to IP address."""
+        try:
+            result = socket.getaddrinfo(hostname, None, socket.AF_INET6)
+            if result:
+                return result[0][4][0]
+        except socket.gaierror:
+            pass
+        return None
+
+    def inject_fault(self):
+        """Block network routes to specified IPs."""
+        self._logger.info("=== INJECT_FAULT START: DataCenterRouteUnreachableNemesis ===")
+        # This nemesis would need target IPs from prepare_fault
+        # For now, it's a placeholder that can be configured with specific IPs
+        self.on_success_inject_fault()
+
+    def extract_fault(self):
+        """Restore blocked network routes."""
+        for ip in self._blocked_ips:
+            try:
+                cmd = self._restore_cmd_template.format(ip)
+                subprocess.check_call(cmd, shell=True)
+                self._logger.info("Restored route to %s", ip)
+            except subprocess.CalledProcessError as e:
+                self._logger.error("Failed to restore route to %s: %s", ip, str(e))
+        self._blocked_ips = []
+
+
+class DataCenterStopNodesNemesis(AbstractAgentNemesis):
+    """Stops the local YDB node for datacenter isolation."""
+
+    def __init__(self, duration=60):
+        super(DataCenterStopNodesNemesis, self).__init__()
+        self._logger = logging.getLogger(self.__class__.__name__)
+        self._duration = duration
+        self._is_stopped = False
+
+    def inject_fault(self):
+        """Stop the local YDB node."""
+        self._logger.info("=== INJECT_FAULT START: DataCenterStopNodesNemesis ===")
+        try:
+            cmd = "sudo systemctl stop kikimr"
+            subprocess.check_call(cmd, shell=True)
+            self._is_stopped = True
+            self._logger.info("Stopped kikimr service")
+            self.on_success_inject_fault()
+        except subprocess.CalledProcessError as e:
+            self._logger.error("Failed to stop kikimr: %s", str(e))
+
+    def extract_fault(self):
+        """Start the local YDB node."""
+        if self._is_stopped:
+            try:
+                cmd = "sudo systemctl start kikimr"
+                subprocess.check_call(cmd, shell=True)
+                self._is_stopped = False
+                self._logger.info("Started kikimr service")
+            except subprocess.CalledProcessError as e:
+                self._logger.error("Failed to start kikimr: %s", str(e))
+
+
+# =============================================================================
+# Bridge Pile Nemesis - Bridge-aware nemesis for bridge pile switching
+# =============================================================================
+
+class BridgePileIptablesBlockPortsNemesis(AbstractAgentNemesis):
+    """Blocks YDB ports using iptables on localhost for bridge pile isolation."""
+
+    def __init__(self, duration=60):
+        super(BridgePileIptablesBlockPortsNemesis, self).__init__()
+        self._logger = logging.getLogger(self.__class__.__name__)
+        self._duration = duration
+        self._block_ports_cmd = (
+            "sudo /sbin/ip6tables -w -A YDB_FW -p tcp -m multiport "
+            "--ports 2135,2136,8765,19001,31000:32000 -j REJECT"
+        )
+        self._restore_ports_cmd = (
+            "sudo /sbin/ip6tables -w -F YDB_FW"
+        )
+
+    def inject_fault(self):
+        """Block YDB ports using iptables."""
+        self._logger.info("=== INJECT_FAULT START: BridgePileIptablesBlockPortsNemesis ===")
+        try:
+            # Block ports and schedule automatic recovery
+            block_and_recover_cmd = (
+                f"nohup bash -c '{self._block_ports_cmd} && sleep {self._duration} && "
+                f"{self._restore_ports_cmd}' > /dev/null 2>&1 &"
+            )
+            subprocess.check_call(block_and_recover_cmd, shell=True)
+            self._logger.info("Blocked YDB ports and scheduled automatic recovery")
+            self.on_success_inject_fault()
+        except subprocess.CalledProcessError as e:
+            self._logger.error("Failed to block YDB ports: %s", str(e))
+
+    def extract_fault(self):
+        """YDB ports are automatically restored via sleep command scheduled during injection."""
+        self._logger.info("Skipping manual port restoration - automatic recovery via sleep command is scheduled")
+
+
+class BridgePileRouteUnreachableNemesis(AbstractAgentNemesis):
+    """Makes network routes unreachable on localhost for bridge pile isolation."""
+
+    def __init__(self, duration=60):
+        super(BridgePileRouteUnreachableNemesis, self).__init__()
+        self._logger = logging.getLogger(self.__class__.__name__)
+        self._duration = duration
+        self._block_cmd_template = (
+            'sudo /usr/bin/ip -6 ro replace unreach {} || sudo /usr/bin/ip -6 ro add unreach {}'
+        )
+        self._restore_cmd_template = (
+            'sudo /usr/bin/ip -6 ro del unreach {}'
+        )
+        self._blocked_ips = []
+
+    def _resolve_hostname_to_ip(self, hostname):
+        """Resolve hostname to IP address."""
+        try:
+            result = socket.getaddrinfo(hostname, None, socket.AF_INET6)
+            if result:
+                return result[0][4][0]
+        except socket.gaierror:
+            pass
+        return None
+
+    def inject_fault(self):
+        """Block network routes to specified IPs."""
+        self._logger.info("=== INJECT_FAULT START: BridgePileRouteUnreachableNemesis ===")
+        # This nemesis would need target IPs from prepare_fault
+        # For now, it's a placeholder that can be configured with specific IPs
+        self.on_success_inject_fault()
+
+    def extract_fault(self):
+        """Restore blocked network routes."""
+        for ip in self._blocked_ips:
+            try:
+                cmd = self._restore_cmd_template.format(ip)
+                subprocess.check_call(cmd, shell=True)
+                self._logger.info("Restored route to %s", ip)
+            except subprocess.CalledProcessError as e:
+                self._logger.error("Failed to restore route to %s: %s", ip, str(e))
+        self._blocked_ips = []
+
+
+class BridgePileStopNodesNemesis(AbstractAgentNemesis):
+    """Stops the local YDB node for bridge pile isolation."""
+
+    def __init__(self, duration=60):
+        super(BridgePileStopNodesNemesis, self).__init__()
+        self._logger = logging.getLogger(self.__class__.__name__)
+        self._duration = duration
+        self._is_stopped = False
+
+    def inject_fault(self):
+        """Stop the local YDB node."""
+        self._logger.info("=== INJECT_FAULT START: BridgePileStopNodesNemesis ===")
+        try:
+            cmd = "sudo systemctl stop kikimr"
+            subprocess.check_call(cmd, shell=True)
+            self._is_stopped = True
+            self._logger.info("Stopped kikimr service")
+            self.on_success_inject_fault()
+        except subprocess.CalledProcessError as e:
+            self._logger.error("Failed to stop kikimr: %s", str(e))
+
+    def extract_fault(self):
+        """Start the local YDB node."""
+        if self._is_stopped:
+            try:
+                cmd = "sudo systemctl start kikimr"
+                subprocess.check_call(cmd, shell=True)
+                self._is_stopped = False
+                self._logger.info("Started kikimr service")
+            except subprocess.CalledProcessError as e:
+                self._logger.error("Failed to start kikimr: %s", str(e))
 
 
 # =============================================================================

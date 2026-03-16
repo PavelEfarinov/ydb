@@ -28,11 +28,7 @@ PEERDIR(
     ydb/tests/library
     ydb/tests/library/stability
     ydb/tests/library/wardens
-    contrib/python/aiocache
     contrib/python/fastapi
-    # contrib/python/pydantic
-    contrib/python/pydantic-settings
-    contrib/python/python-dotenv
 )
 
 END()

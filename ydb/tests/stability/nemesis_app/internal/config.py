@@ -1,8 +1,65 @@
 from functools import lru_cache
+import os
 import sys
+from typing import Any, TypeVar, Type
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
-import logging
+T = TypeVar('T', bound='BaseSettings')
+
+
+class BaseSettings:
+    """Base settings class that loads from defaults, environment variables, and allows override."""
+
+    def __init__(self, **kwargs):
+        """
+        Initialize settings with priority: kwargs > env vars > defaults.
+
+        Args:
+            **kwargs: Override values (typically from command-line arguments)
+        """
+        # Get all class attributes that are not methods or private
+        for key, value in self.__class__.__dict__.items():
+            if not key.startswith('_') and not callable(value):
+                # Start with default value
+                default_value = value
+
+                # Try to get from environment variable (convert field name to uppercase)
+                env_var_name = key.upper()
+                env_value = os.getenv(env_var_name)
+
+                # Set value with priority: kwargs > env > default
+                if key in kwargs and kwargs[key] is not None:
+                    setattr(self, key, kwargs[key])
+                elif env_value is not None:
+                    setattr(self, key, self._convert_type(env_value, type(default_value)))
+                else:
+                    setattr(self, key, default_value)
+
+    def _convert_type(self, value: str, target_type: type) -> Any:
+        """Convert string value to target type."""
+        if target_type == int:
+            return int(value)
+        elif target_type == bool:
+            return value.lower() in ('true', '1', 'yes', 'on')
+        elif target_type == list:
+            # Handle list parsing (comma-separated)
+            return [item.strip() for item in value.split(',') if item.strip()]
+        else:
+            return value
+
+    def __repr__(self) -> str:
+        """String representation of settings."""
+        attrs = []
+        for key, value in self.__dict__.items():
+            attrs.append(f"{key}={repr(value)}")
+        return f"{self.__class__.__name__}({', '.join(attrs)})"
+
+    @classmethod
+    def from_args(cls: Type[T], **kwargs) -> T:
+        """
+        Create Settings instance with argv arguments having highest priority.
+        Priority: argv > env > default values
+        """
+        return cls(**kwargs)
 
 
 class Settings(BaseSettings):
@@ -15,26 +72,6 @@ class Settings(BaseSettings):
     mon_port: int = 8765
     yaml_config_location: str = '/home/pefavel/ydbwork/arcadia/kikimr/ci/stability/resources/ydb_myt_3_dc_stability_testing/cluster.yaml'
 
-    model_config = SettingsConfigDict(env_file=".env")
-
-    @classmethod
-    def from_args(cls, **kwargs) -> 'Settings':
-        """
-        Create Settings instance with argv arguments having highest priority.
-        Priority: argv > env > default values
-        """
-        # Get base settings (env + defaults)
-        base_settings = cls()
-
-        # Override with argv arguments (only if provided)
-        for key, value in kwargs.items():
-            if value is not None and hasattr(base_settings, key):
-                setattr(base_settings, key, value)
-            else:
-                logging.getLogger(__name__).warning(f"Invalid argument key: {key}")
-
-        return base_settings
-
 
 class AgentSettings(BaseSettings):
     app_name: str = "Nemesis Agent API"
@@ -43,17 +80,14 @@ class AgentSettings(BaseSettings):
     app_port: int = 31434
     mon_port: int = 8765
 
-    model_config = SettingsConfigDict(env_file=".env")
-
     @classmethod
-    def from_master_args(cls, settings: Settings) -> 'AgentSettings':
-        base_settings = cls()
-
-        base_settings.app_host = settings.app_host
-        base_settings.app_port = settings.app_port
-        base_settings.mon_port = settings.mon_port
-
-        return base_settings
+    def from_master_args(cls: Type['AgentSettings'], settings: Settings) -> 'AgentSettings':
+        """Create AgentSettings from master Settings."""
+        return cls(
+            app_host=settings.app_host,
+            app_port=settings.app_port,
+            mon_port=settings.mon_port
+        )
 
 
 @lru_cache
