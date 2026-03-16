@@ -88,6 +88,7 @@ class ProcessManager:
                 await loop.run_in_executor(None, execute_with_logging)
                 self.processes[proc_id]['status'] = 'finished'
                 self.processes[proc_id]['ret_code'] = 0
+                await flush_task
             except Exception as e:
                 import traceback
                 self.processes[proc_id]['status'] = 'error'

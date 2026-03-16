@@ -183,6 +183,43 @@ async def create_host_process(req: CreateHostProcessRequest):
         return {"status": "error", "message": str(e)}
 
 
+# Nemesis group definitions
+NEMESIS_GROUPS = {
+    "TabletNemesis": {
+        "description": "Kill tablet processes via gRPC",
+        "patterns": ["KillCoordinator", "KillMediator", "KillDataShard", "KillHive",
+                     "KillBsController", "KillSchemeShard", "KillPersQueue", "KillKeyValue",
+                     "KillTxAllocator", "KillNodeBroker", "KillTenantSlotBroker",
+                     "KillBlockstoreVolume", "KillBlockstorePartition"]
+    },
+    "NodeNemesis": {
+        "description": "Node and process management",
+        "patterns": ["NodeKiller", "KillSlot", "Suspend", "Restart", "StopStart"]
+    },
+    "NetworkNemesis": {
+        "description": "Network fault injection",
+        "patterns": ["Network"]
+    },
+    "HiveNemesis": {
+        "description": "Hive tablet management operations",
+        "patterns": ["ReBalance", "ChangeTabletGroup", "BulkChangeTabletGroup"]
+    },
+    "TestNemesis": {
+        "description": "Test and debug nemesis",
+        "patterns": ["Test", "Throwing", "Shell"]
+    }
+}
+
+
+def get_nemesis_group(nemesis_name: str) -> str:
+    """Determine which group a nemesis belongs to based on its name."""
+    for group_name, group_info in NEMESIS_GROUPS.items():
+        for pattern in group_info["patterns"]:
+            if pattern in nemesis_name:
+                return group_name
+    return "Other"
+
+
 @router.get("/api/process_types")
 async def get_process_types():
     """Return process types with their descriptions"""
@@ -195,6 +232,39 @@ async def get_process_types():
             "description": description
         })
     return result
+
+
+@router.get("/api/process_types/grouped")
+async def get_process_types_grouped():
+    """Return process types grouped by category with descriptions"""
+    groups = {}
+
+    # Initialize groups
+    for group_name, group_info in NEMESIS_GROUPS.items():
+        groups[group_name] = {
+            "description": group_info["description"],
+            "nemesis": []
+        }
+    groups["Other"] = {
+        "description": "Other nemesis types",
+        "nemesis": []
+    }
+
+    # Categorize each nemesis
+    for name, definition in PROCESS_TYPES.items():
+        runner = definition.get('runner')
+        description = runner.nemesis_description if runner and hasattr(runner, 'nemesis_description') else ""
+        group = get_nemesis_group(name)
+
+        groups[group]["nemesis"].append({
+            "name": name,
+            "description": description
+        })
+
+    # Remove empty groups
+    groups = {k: v for k, v in groups.items() if v["nemesis"]}
+
+    return groups
 
 
 @router.get("/api/hosts/health", response_model=Dict[str, Any])

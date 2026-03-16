@@ -6,6 +6,7 @@ PY_SRCS(
     internal/config.py
     internal/models.py
     internal/defaults.py
+    internal/tmp_nemesis.py
     routers/agent_router.py
     routers/orchestrator_router.py
     internal/agent_warden_checker.py

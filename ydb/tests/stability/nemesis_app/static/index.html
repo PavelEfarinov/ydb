@@ -15,10 +15,16 @@
   </div>
 
   <div class="grid grid-cols-12 gap-6">
-    <!-- Left Column: Processes (7 cols) -->
     <div class="col-span-7">
-      <process-type-group v-for="typeObj in processTypes" :key="typeObj.name" :type="typeObj.name" :description="typeObj.description" :hosts="hosts"
-        :processes="getProcessesByType(typeObj.name)"></process-type-group>
+      <nemesis-group-accordion
+        v-for="(groupData, groupName) in groupedProcessTypes"
+        :key="groupName"
+        :group-name="groupName"
+        :group-description="groupData.description"
+        :nemesis-list="groupData.nemesis"
+        :hosts="hosts"
+        :processes="processes"
+      ></nemesis-group-accordion>
     </div>
 
     <!-- Right Column: Hosts Status, Warden Checks & Schedule History (5 cols) -->
@@ -92,6 +98,7 @@
   import HostStatusItem from './HostStatusItem.js'
   import ProcessTypeGroup from './ProcessTypeGroup.js'
   import WardenChecksCard from './WardenChecksCard.js'
+  import NemesisGroupAccordion from './NemesisGroupAccordion.js'
 
   const { createApp, ref, computed } = Vue
 
@@ -99,7 +106,8 @@
     components: {
       HostStatusItem,
       ProcessTypeGroup,
-      WardenChecksCard
+      WardenChecksCard,
+      NemesisGroupAccordion
     },
     setup() {
       const message = ref('Nemesis')
@@ -107,6 +115,7 @@
       const healthcheck = ref({})
       const hostsFetchError = ref(null)
       const processTypes = ref([]) // Array of {name, description}
+      const groupedProcessTypes = ref({}) // { groupName: { description, nemesis: [...] } }
       const processes = ref({}) // { host: [ProcessInfo, ...] }
       const errors = ref([])
       const scheduleHistory = ref([]) // Array of scheduled execution history
@@ -148,6 +157,13 @@
         axios.get('/api/process_types')
           .then(response => {
             processTypes.value = response.data
+          })
+      }
+
+      function get_grouped_process_types() {
+        axios.get('/api/process_types/grouped')
+          .then(response => {
+            groupedProcessTypes.value = response.data
           })
       }
 
@@ -220,6 +236,7 @@
       // Initial load
       get_hosts_health()
       get_process_types()
+      get_grouped_process_types()
       get_all_processes()
       get_healthcheck()
       get_schedule_history()
@@ -240,6 +257,7 @@
         healthcheck,
         hostsFetchError,
         processTypes,
+        groupedProcessTypes,
         processes,
         errors,
         scheduleHistory,

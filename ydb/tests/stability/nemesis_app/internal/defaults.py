@@ -1,7 +1,6 @@
 import signal
 import logging
 import random
-
 import subprocess
 import time
 from ydb.tests.tools.nemesis.library import base
@@ -153,7 +152,9 @@ class ThrowingNemesis(AbstractAgentNemesis):
         raise Exception('some custom exception')
 
 
-PROCESS_TYPES = {
+# Base PROCESS_TYPES - additional types are added from tmp_nemesis below
+_BASE_PROCESS_TYPES = {
+    # Test nemesis
     "TestShellNemesis": {
         "runner": ShellNemesis("echo 'Type 1 process started'; sleep 1; echo 'Type 1 output' >&2; sleep 1; echo 'Type 1 finished'"),
         "schedule": 10
@@ -166,12 +167,66 @@ PROCESS_TYPES = {
         "runner": ThrowingNemesis(),
         "schedule": 10
     },
+    # Network nemesis
     "NetworkNemesis": {
         "runner": NetworkNemesis(),
         "schedule": 200
     },
+    # Node killer
     "NodeKiller": {
         "runner": KillNodeNemesis(),
         "schedule": 300
     },
 }
+
+
+def _get_process_types():
+    """
+    Lazily load and merge all process types to avoid circular imports.
+    tmp_nemesis imports AbstractAgentNemesis from this module,
+    so we need to delay importing ALL_NEMESIS_TYPES until after class definitions.
+    """
+    from ydb.tests.stability.nemesis_app.internal.tmp_nemesis import ALL_NEMESIS_TYPES
+    return {**_BASE_PROCESS_TYPES, **ALL_NEMESIS_TYPES}
+
+
+# PROCESS_TYPES is populated lazily on first access
+class _ProcessTypesProxy(dict):
+    """Proxy dict that lazily loads process types on first access."""
+    _loaded = False
+
+    def _ensure_loaded(self):
+        if not self._loaded:
+            self.update(_get_process_types())
+            self._loaded = True
+
+    def __getitem__(self, key):
+        self._ensure_loaded()
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        self._ensure_loaded()
+        return super().__contains__(key)
+
+    def __iter__(self):
+        self._ensure_loaded()
+        return super().__iter__()
+
+    def keys(self):
+        self._ensure_loaded()
+        return super().keys()
+
+    def values(self):
+        self._ensure_loaded()
+        return super().values()
+
+    def items(self):
+        self._ensure_loaded()
+        return super().items()
+
+    def get(self, key, default=None):
+        self._ensure_loaded()
+        return super().get(key, default)
+
+
+PROCESS_TYPES = _ProcessTypesProxy()
