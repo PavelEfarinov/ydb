@@ -1,12 +1,4 @@
-"""
-OrchestratorWardenChecker - Orchestrator-side asynchronous liveness and safety checks collector.
-
-This module provides the OrchestratorWardenChecker class that runs on the orchestrator
-and performs LIVENESS checks (tablets alive, boot queue, etc. - uses HTTP monitoring, no SSH needed)
-and orchestrator-level SAFETY checks (PDisk state, aggregated VERIFY failed errors).
-
-Uses warden definitions from liveness_warden_factory() and orchestrator_safety_warden_factory().
-"""
+"""Orchestrator-side liveness and safety checks collector."""
 
 import asyncio
 import json
@@ -18,6 +10,8 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Any
 
+from ydb.tests.library.harness.kikimr_cluster import ExternalKiKiMRCluster
+from ydb.tests.stability.nemesis_app.internal.config import get_master_settings
 from ydb.tests.stability.nemesis_app.internal.agent_warden_checker import (
     WardenCheckResult,
     WardenCheckReport,
@@ -27,10 +21,6 @@ from ydb.tests.stability.nemesis_app.internal.agent_warden_checker import (
 
 logger = logging.getLogger(__name__)
 
-
-# =============================================================================
-# Warden Factory Functions (Orchestrator-specific)
-# =============================================================================
 
 def liveness_warden_factory() -> List[Dict[str, Any]]:
     """
@@ -105,10 +95,6 @@ def get_all_warden_definitions() -> List[Dict[str, Any]]:
     return all_wardens
 
 
-# =============================================================================
-# Post-processors for violations
-# =============================================================================
-
 def deduplicate_verify_failed(violations: List[str]) -> List[str]:
     """
     Post-process VERIFY failed violations:
@@ -155,63 +141,8 @@ def deduplicate_verify_failed(violations: List[str]) -> List[str]:
     return result
 
 
-# =============================================================================
-# Minimal Cluster Objects for Wardens
-# =============================================================================
-
-class MinimalNode:
-    """Minimal node object for wardens that need node.host and node.mon_port."""
-
-    def __init__(self, host: str, mon_port: int, node_id: int):
-        self.host = host
-        self.mon_port = mon_port
-        self.node_id = node_id
-        self._monitor = None
-
-    @property
-    def monitor(self):
-        if self._monitor is None:
-            from ydb.tests.library.clients.kikimr_monitoring import KikimrMonitor
-            self._monitor = KikimrMonitor(self.host, self.mon_port)
-        return self._monitor
-
-
-class MinimalCluster:
-    """
-    Minimal cluster-like object for wardens.
-
-    Provides the interface expected by wardens:
-    - cluster.nodes: dict of node_id -> node
-    - cluster.slots: dict of slot_id -> slot (empty for minimal)
-    - node.host, node.mon_port, node.monitor
-    """
-
-    def __init__(self, hosts: List[str], mon_port: int = 8765):
-        self.nodes = {}
-        self.slots = {}
-        for i, host in enumerate(hosts):
-            node_id = i + 1
-            self.nodes[node_id] = MinimalNode(host, mon_port, node_id)
-
-
-# =============================================================================
-# Orchestrator Warden Checker
-# =============================================================================
-
 class OrchestratorWardenChecker:
-    """
-    Orchestrator-side warden checker that runs LIVENESS checks centrally.
-
-    Liveness checks use HTTP monitoring endpoints and can be run from
-    a central location (orchestrator). No SSH required.
-
-    Uses warden definitions from liveness_warden_factory() and
-    orchestrator_safety_warden_factory().
-
-    Args:
-        hosts: List of host addresses for monitoring
-        mon_port: Monitoring port (default 8765)
-    """
+    """Orchestrator-side warden checker for liveness and safety checks."""
 
     def __init__(self, hosts: List[str] = None, mon_port: int = 8765):
         self._last_report: WardenCheckReport = WardenCheckReport(status='idle')
@@ -222,7 +153,7 @@ class OrchestratorWardenChecker:
         self._cluster = None
 
     def set_hosts(self, hosts: List[str], mon_port: int = None):
-        """Set or update the list of hosts to monitor."""
+        """Set hosts to monitor."""
         self._hosts = hosts
         if mon_port is not None:
             self._mon_port = mon_port
@@ -230,17 +161,17 @@ class OrchestratorWardenChecker:
         self._cluster = None
 
     def is_running(self) -> bool:
-        """Check if checks are currently running."""
+        """Return True if checks are running."""
         with self._lock:
             return self._is_running
 
     def get_last_result(self) -> Dict[str, Any]:
-        """Return the last check result as a dictionary."""
+        """Return last check result."""
         with self._lock:
             return self._last_report.to_dict()
 
     def get_available_checks(self) -> List[Dict[str, Any]]:
-        """Return list of available checks for master."""
+        """Return available checks for master."""
         checks = []
         for w in liveness_warden_factory():
             checks.append({
@@ -259,12 +190,7 @@ class OrchestratorWardenChecker:
         return checks
 
     async def start_checks(self) -> bool:
-        """
-        Start running liveness checks asynchronously in a separate thread.
-
-        Returns:
-            True if checks were started, False if already running
-        """
+        """Start liveness checks asynchronously."""
         with self._lock:
             if self._is_running:
                 logger.debug("Orchestrator checks already running, skipping")
@@ -283,7 +209,7 @@ class OrchestratorWardenChecker:
         return True
 
     def _run_checks_sync(self):
-        """Synchronous wrapper for running checks in a thread."""
+        """Run checks synchronously."""
         start_time = datetime.utcnow()
         logger.info("Orchestrator warden checks execution started")
 
@@ -296,7 +222,7 @@ class OrchestratorWardenChecker:
 
             if cluster is not None:
                 logger.debug("Running liveness checks...")
-                liveness_results = self._run_liveness_checks_sync(cluster)
+                liveness_results = self._run_liveness_checks_sync()
                 logger.debug(f"Liveness checks completed: {len(liveness_results)} checks")
 
                 # PDisk check also uses HTTP, run it here
@@ -347,30 +273,15 @@ class OrchestratorWardenChecker:
                 self._is_running = False
 
     def _get_cluster(self):
-        """Create a minimal cluster-like object for wardens."""
+        """Create cluster object for wardens."""
         if self._cluster is None and self._hosts:
-            self._cluster = MinimalCluster(self._hosts, self._mon_port)
+            self._cluster = ExternalKiKiMRCluster(get_master_settings().yaml_config_location, None, None)
         return self._cluster
 
-    # Default path to the compiled nemesis binary
     NEMESIS_BINARY_PATH = '/Berkanavt/nemesis/bin/agent'
 
-    def _run_liveness_checks_sync(
-        self,
-        cluster,
-        timeout_seconds: int = 60
-    ) -> List[WardenCheckResult]:
-        """
-        Run liveness checks using subprocess with hard timeout.
-
-        This method spawns a separate process to run liveness checks.
-        The process can be killed if it exceeds the timeout, providing
-        a reliable way to prevent hanging on slow/loaded clusters.
-
-        Args:
-            cluster: The cluster object (used for config path)
-            timeout_seconds: Total timeout for all liveness checks (default 60s)
-        """
+    def _run_liveness_checks_sync(self, timeout_seconds: int = 60) -> List[WardenCheckResult]:
+        """Run liveness checks via subprocess with timeout."""
         from ydb.tests.stability.nemesis_app.internal.config import Settings
 
         # Get config path from settings
@@ -394,8 +305,7 @@ class OrchestratorWardenChecker:
         cmd = [
             self.NEMESIS_BINARY_PATH,
             'liveness',
-            '--yaml-config-location', yaml_config,
-            '--mon-port', str(self._mon_port)
+            '--yaml-config-location', yaml_config
         ]
 
         try:
@@ -479,7 +389,7 @@ class OrchestratorWardenChecker:
             )]
 
     def _run_pdisk_check_sync(self, cluster) -> List[WardenCheckResult]:
-        """Run PDisk state check (uses HTTP, not SSH)."""
+        """Run PDisk state check."""
         results = []
 
         try:
@@ -512,20 +422,8 @@ class OrchestratorWardenChecker:
 
         return results
 
-    def _run_aggregated_verify_failed_check_sync(
-        self,
-        max_wait_seconds: int = 120,
-        poll_interval_seconds: float = 2.0
-    ) -> WardenCheckResult:
-        """
-        Run aggregated VERIFY failed check synchronously.
-        This check waits for all agents to complete their safety checks,
-        then aggregates and deduplicates VERIFY failed errors from all hosts.
-
-        Args:
-            max_wait_seconds: Maximum time to wait for all agents to complete (default 120s)
-            poll_interval_seconds: Interval between polling attempts (default 2s)
-        """
+    def _run_aggregated_verify_failed_check_sync(self, max_wait_seconds: int = 120, poll_interval_seconds: float = 2.0) -> WardenCheckResult:
+        """Aggregate VERIFY failed errors from all agents."""
         import requests
         from ydb.tests.stability.nemesis_app.routers.orchestrator_router import hosts, get_app_port, is_local_host
 
@@ -638,5 +536,4 @@ class OrchestratorWardenChecker:
         )
 
 
-# Global instance for the orchestrator (liveness + safety checks)
 orchestrator_warden_checker = OrchestratorWardenChecker()

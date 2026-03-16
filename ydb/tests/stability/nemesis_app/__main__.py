@@ -3,8 +3,8 @@ import json
 import logging
 import sys
 import uvicorn
-from functools import lru_cache
-from ydb.tests.stability.nemesis_app.internal import config
+from ydb.tests.library.harness.kikimr_cluster import ExternalKiKiMRCluster
+from ydb.tests.stability.nemesis_app.internal.config import get_master_settings
 from ydb.tests.stability.nemesis_app.internal.install import get_hosts_from_yaml, install_on_hosts, stop_agent_services
 
 
@@ -19,8 +19,8 @@ def parse_args():
     parser.add_argument(
         'command',
         nargs='?',
-        choices=['run', 'stop', 'liveness', ''],
-        help='Command to run: run (install services), stop (stop services), liveness (run liveness checks)'
+        choices=['run', 'stop', 'liveness', 'install'],
+        help='Command to run: run (install and run nemesis services), stop (stop nemesis services), liveness (run liveness checks)'
     )
 
     # Optional settings arguments (override env and defaults)
@@ -28,22 +28,14 @@ def parse_args():
                         help='Type of nemesis: master or agent')
     parser.add_argument('--app-host', help='Host to bind the application to')
     parser.add_argument('--app-port', type=int, help='Port to bind the application to')
-    parser.add_argument('--yaml-config-location', help='Path to cluster.yaml config file')
+    parser.add_argument('--yaml-config-location', help='Path to cluster.yaml config file', required=False)  # True) for dev
     parser.add_argument('--static-location', help='Path to static files directory')
     parser.add_argument('--mon-port', type=int, default=8765, help='Monitoring port for liveness checks')
 
     return parser.parse_args()
 
 
-@lru_cache
-def get_settings(**kwargs):
-    """Get settings with argv arguments having highest priority."""
-    settings = config.Settings.from_args(**kwargs)
-    print(settings, file=sys.stderr)
-    return settings
-
-
-def run_liveness_checks(settings, mon_port: int):
+def run_liveness_checks(settings):
     """
     Run liveness checks synchronously and output JSON result to stdout.
 
@@ -85,10 +77,9 @@ def run_liveness_checks(settings, mon_port: int):
     from ydb.tests.library.wardens.hive import AllTabletsAliveLivenessWarden, BootQueueSizeWarden
     from ydb.tests.library.wardens.schemeshard import SchemeShardHasNoInFlightTransactions
     from ydb.tests.library.wardens.datashard import TxCompleteLagLivenessWarden
-    from ydb.tests.stability.nemesis_app.internal.orchestrator_warden_checker import MinimalCluster
 
     # Create cluster object
-    cluster = MinimalCluster(hosts, mon_port)
+    cluster = ExternalKiKiMRCluster(get_master_settings().yaml_config_location, None, None)
 
     # Define wardens to run
     warden_configs = [
@@ -151,17 +142,17 @@ def main():
     if args.static_location is not None:
         argv_kwargs['static_location'] = args.static_location
 
-    settings = get_settings(**argv_kwargs)
+    settings = get_master_settings(**argv_kwargs)
 
     # Check for command-line arguments
-    if args.command == "run":
+    if args.command == "install":
         # Install mode: deploy services and print orchestrator endpoint
         print("Installing nemesis services on cluster...")
         hosts = get_hosts_from_yaml(settings.yaml_config_location)
         settings.hosts = hosts
         print(f"Hosts: {hosts}")
 
-        orchestrator_host = install_on_hosts(hosts, settings.yaml_config_location)
+        orchestrator_host = install_on_hosts(hosts, settings)
 
         print("\n" + "=" * 60)
         print("Installation completed successfully!")
@@ -186,17 +177,20 @@ def main():
     elif args.command == "liveness":
         # Liveness mode: run liveness checks and output JSON to stdout
         # This is designed to be called as a subprocess with timeout
-        run_liveness_checks(settings, args.mon_port)
+        run_liveness_checks(settings)
         return
 
-    # Default mode: run the application
-    # workers=1 is important because we store state in memory
-    uvicorn.run(
-        "ydb.tests.stability.nemesis_app.app:app",
-        host=settings.app_host,
-        port=settings.app_port,
-        workers=1
-    )
+    elif args.command == "run":
+        # run the application
+        # workers=1 is important because we store state in memory
+        uvicorn.run(
+            "ydb.tests.stability.nemesis_app.app:app",
+            host=settings.app_host,
+            port=settings.app_port,
+            workers=1
+        )
+    else:
+        raise ValueError(f"Unknown command: {args.command}")
 
 
 if __name__ == "__main__":

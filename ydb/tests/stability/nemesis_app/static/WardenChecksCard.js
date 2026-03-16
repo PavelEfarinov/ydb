@@ -176,13 +176,28 @@ export default {
         liveness,
         safety: Array.from(safetyMap.values()),
         totalAgents: totalAgentCount.value,
-        completedAgents: completedAgentCount.value
+        completedAgents: completedAgentCount.value,
+        completedAt: orchestratorResult.value.completed_at
       }
     })
 
     // Display results - use available checks format before running, actual results after
+    // If aggregatedResults has empty fields, fill them from availableChecksAsResults
     const displayResults = computed(() => {
-      return hasResults.value ? aggregatedResults.value : availableChecksAsResults.value
+      if (!hasResults.value) {
+        return availableChecksAsResults.value
+      }
+      
+      const agg = aggregatedResults.value
+      const avail = availableChecksAsResults.value
+      
+      return {
+        liveness: agg.liveness.length > 0 ? agg.liveness : avail.liveness,
+        safety: agg.safety.length > 0 ? agg.safety : avail.safety,
+        totalAgents: agg.totalAgents,
+        completedAgents: agg.completedAgents,
+        completedAt: agg.completedAt
+      }
     })
 
     const overallStatus = computed(() => {
@@ -338,6 +353,7 @@ export default {
           <h2 class="card-title text-lg">
             Warden Checks
             <span class="badge" :class="statusBadgeClass">{{ overallStatus }}</span>
+            <span>{{ displayResults.completedAt }}</span>
           </h2>
           <button 
             class="btn btn-sm btn-primary" 
@@ -388,7 +404,7 @@ export default {
                         v-else-if="check.status === 'idle'"
                         class="badge badge-ghost badge-sm gap-1"
                       >
-                        <span>?</span> Pending
+                        <span>?</span> Idle
                       </span>
                       <span
                         v-else-if="check.status === 'violation'"
@@ -417,7 +433,8 @@ export default {
                     </td>
                   </tr>
                   <tr v-if="displayResults.liveness.length === 0">
-                    <td colspan="3" class="text-center opacity-50">No liveness checks</td>
+                    <td v-if="displayResults.status === 'error'" colspan="3" class="text-center opacity-50">Error</td>
+                    <td v-else colspan="3" class="text-center opacity-50">No liveness checks</td>
                   </tr>
                 </tbody>
               </table>
@@ -453,7 +470,7 @@ export default {
                         v-else-if="check.status === 'idle'"
                         class="badge badge-ghost badge-sm gap-1"
                       >
-                        <span>?</span> Pending
+                        <span>?</span> Idle
                       </span>
                       <span
                         v-else
