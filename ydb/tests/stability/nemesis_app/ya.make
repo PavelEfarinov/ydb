@@ -5,8 +5,9 @@ PY_SRCS(
     internal/install.py
     internal/config.py
     internal/models.py
-    internal/defaults.py
-    internal/tmp_nemesis.py
+    internal/nemesis/catalog.py
+    internal/nemesis/runner.py
+    internal/event_loop.py
     routers/agent_router.py
     routers/orchestrator_router.py
     internal/agent_warden_checker.py

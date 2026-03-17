@@ -7,7 +7,6 @@ and performs SAFETY checks only (log checks, dmesg OOM - requires local access).
 Uses warden definitions from agent_safety_warden_factory().
 """
 
-import asyncio
 import logging
 import socket
 import threading
@@ -15,38 +14,10 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, field
 
+from ydb.tests.stability.nemesis_app.internal.event_loop import BackgroundEventLoop
+
 
 logger = logging.getLogger(__name__)
-
-
-# =============================================================================
-# Warden Factory Functions (Agent-specific)
-# =============================================================================
-
-def agent_safety_warden_factory() -> List[Dict[str, Any]]:
-    """
-    Returns list of agent safety warden definitions.
-    These run locally on each agent (log checks, dmesg, etc.).
-    """
-    return [
-        {
-            'name': 'GrepLogFileForMarkersSafetyWarden',
-            'description': 'Check kikimr.start logs for error markers',
-        },
-        {
-            'name': 'GrepGzippedLogFilesForMarkersSafetyWarden',
-            'description': 'Check gzipped kikimr.start logs for error markers',
-        },
-        {
-            'name': 'GrepDMesgForPatternsSafetyWarden',
-            'description': 'Check dmesg for OOM and other critical patterns',
-        },
-        {
-            'name': 'UnifiedAgentVerifyFailedSafetyWarden',
-            'description': 'Check unified_agent logs for VERIFY failed errors',
-        },
-    ]
-
 
 # =============================================================================
 # Data Classes
@@ -118,7 +89,6 @@ class AgentWardenChecker:
     Supports operations:
     - start_checks(): Begin running checks asynchronously
     - get_last_result(): Return the last check result
-    - get_available_checks(): Return list of available check definitions
 
     Args:
         log_directory: Path to kikimr logs directory
@@ -132,6 +102,7 @@ class AgentWardenChecker:
         self._log_directory = log_directory
         self._ssh_username = ssh_username
         self._hostname = socket.gethostname()
+        self._event_loop = BackgroundEventLoop()
 
     def is_running(self) -> bool:
         """Check if checks are currently running."""
@@ -143,21 +114,9 @@ class AgentWardenChecker:
         with self._lock:
             return self._last_report.to_dict()
 
-    def get_available_checks(self) -> List[Dict[str, Any]]:
-        """Return list of available safety checks for this agent."""
-        return [
-            {
-                'name': w['name'],
-                'category': 'safety',
-                'description': w['description'],
-                'location': 'agent'
-            }
-            for w in agent_safety_warden_factory()
-        ]
-
-    async def start_checks(self) -> bool:
+    def start_checks(self) -> bool:
         """
-        Start running safety checks asynchronously in a separate thread.
+        Start running safety checks in the background event loop.
 
         Returns:
             True if checks were started, False if already running
@@ -172,27 +131,24 @@ class AgentWardenChecker:
                 started_at=datetime.utcnow().isoformat() + 'Z'
             )
 
-        logger.info(f"[{self._hostname}] Starting agent safety checks in background thread")
+        logger.info(f"[{self._hostname}] Starting agent safety checks in background event loop")
 
-        # Run checks in background thread
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, self._run_checks_sync)
+        # Submit async checks to background event loop
+        self._event_loop.submit(self._run_checks_async())
         return True
 
-    def _run_checks_sync(self):
-        """Synchronous wrapper for running checks in a thread."""
+    async def _run_checks_async(self):
+        """Run safety checks asynchronously in the background event loop."""
         start_time = datetime.utcnow()
         logger.info(f"[{self._hostname}] Agent safety checks execution started")
 
         try:
-            # Run checks synchronously without creating a new event loop
-            # This avoids deadlock when run_in_executor is called inside
             safety_results = []
-            
+
             # Run checks with progress updates
             for result in self._run_safety_checks_with_progress():
                 safety_results.append(result)
-                
+
                 # Update report with current progress
                 with self._lock:
                     self._last_report = WardenCheckReport(

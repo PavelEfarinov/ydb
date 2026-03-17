@@ -4,6 +4,7 @@ import os
 
 from flask import Flask, jsonify
 
+from ydb.tests.library.stability.healthcheck.healthcheck_reporter import HealthCheckReporter
 from ydb.tests.stability.nemesis_app.internal import config
 from ydb.tests.stability.nemesis_app.internal.install import get_hosts_from_yaml
 from ydb.tests.stability.nemesis_app.internal.agent_warden_checker import AgentWardenChecker
@@ -61,8 +62,8 @@ def initialize_app():
         load_nemesis_config()
 
         # Start healthcheck reporter
-        # healthcheck_reporter = HealthCheckReporter(hosts, store_results=True)
-        # healthcheck_reporter.start_healthchecks()
+        healthcheck_reporter = HealthCheckReporter(hosts, store_results=True)
+        healthcheck_reporter.start_healthchecks()
 
         # Share state with orchestrator router
         from ydb.tests.stability.nemesis_app.routers import orchestrator_router
@@ -94,7 +95,7 @@ def cleanup_app(exception=None):
 
 def create_app():
     settings = get_settings()
-    
+
     # Configure static folder for orchestrator mode
     static_folder = None
     if settings.nemesis_type != 'agent':
@@ -103,7 +104,7 @@ def create_app():
         print(f"Nemesis type: {settings.nemesis_type}")
     else:
         print(f"Static files NOT configured. Nemesis type: {settings.nemesis_type}")
-    
+
     app = Flask(__name__, static_folder=static_folder, static_url_path='/static')
 
     # Register teardown handler

@@ -2,13 +2,12 @@ import logging
 import socket
 import threading
 import time
-import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from flask import Blueprint, request, jsonify
 
-from ydb.tests.stability.nemesis_app.internal.defaults import PROCESS_TYPES
+from ydb.tests.stability.nemesis_app.internal.nemesis.catalog import PROCESS_TYPES
 from ydb.tests.stability.nemesis_app.internal.orchestrator_warden_checker import (
     OrchestratorWardenChecker,
     get_all_warden_definitions,
@@ -169,16 +168,16 @@ def create_host_process():
     data = request.get_json()
     if not data:
         return jsonify({"status": "error", "message": "No data provided"}), 400
-    
+
     process_type = data.get("type")
     host = data.get("host")
     action = data.get("action", "inject")
-    
+
     if not process_type:
         return jsonify({"status": "error", "message": "Missing type field"}), 400
     if not host:
         return jsonify({"status": "error", "message": "Missing host field"}), 400
-    
+
     if process_type not in PROCESS_TYPES:
         return jsonify({"status": "error", "message": "Invalid process type"}), 400
     if host not in hosts:
@@ -309,16 +308,16 @@ def set_schedule():
     data = request.get_json()
     if not data:
         return jsonify({"status": "error", "message": "No data provided"}), 400
-    
+
     process_type = data.get("type")
     enabled = data.get("enabled")
     interval = data.get("interval")
-    
+
     if not process_type:
         return jsonify({"status": "error", "message": "Missing type field"}), 400
     if enabled is None:
         return jsonify({"status": "error", "message": "Missing enabled field"}), 400
-    
+
     if process_type not in PROCESS_TYPES:
         return jsonify({"status": "error", "message": "Invalid process type"}), 400
 
@@ -406,29 +405,6 @@ def start_warden_checks_on_all_hosts():
     logger.info(f"Starting warden checks on all hosts. Total hosts: {len(hosts)}")
     results = {"agents": {}, "master": {}}
 
-    # 1. Start orchestrator checks (liveness + orchestrator safety)
-    logger.info("Starting orchestrator warden checks (liveness + PDisk + aggregated)")
-    
-    # Handle async method in sync context
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # If there's already a running loop, create a new one
-            with ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, orchestrator_warden_checker.start_checks())
-                orchestrator_started = future.result()
-        else:
-            orchestrator_started = asyncio.run(orchestrator_warden_checker.start_checks())
-    except RuntimeError:
-        # No event loop, create one
-        orchestrator_started = asyncio.run(orchestrator_warden_checker.start_checks())
-    
-    results["master"] = {
-        "status": "started" if orchestrator_started else "already_running",
-        "type": "liveness"
-    }
-    logger.info(f"Orchestrator checks: {'started' if orchestrator_started else 'already running'}")
-
     # 2. Start safety checks on all agents
     def start_safety_on_host(host):
         try:
@@ -449,19 +425,31 @@ def start_warden_checks_on_all_hosts():
             logger.error(f"Failed to start safety checks on agent {host}: {e}")
             return host, {"status": "error", "message": str(e)}
 
-    with ThreadPoolExecutor(max_workers=min(len(hosts), 10)) as executor:
-        futures = [executor.submit(start_safety_on_host, host) for host in hosts]
-        started_count = 0
-        error_count = 0
-        for future in as_completed(futures):
-            host, result = future.result()
-            results["agents"][host] = result
-            if result.get("status") == "started":
-                started_count += 1
-            elif result.get("status") == "error":
-                error_count += 1
+    # Use ThreadPoolExecutor to run tasks in parallel (since start_warden_checks_helper is now sync)
+    with ThreadPoolExecutor() as executor:
+        task_results = list(executor.map(start_safety_on_host, hosts))
+
+    started_count = 0
+    error_count = 0
+    for host, result in task_results:
+        results["agents"][host] = result
+        if result.get("status") == "started":
+            started_count += 1
+        elif result.get("status") == "error":
+            error_count += 1
 
     logger.info(f"Agent safety checks initiated: {started_count} started, {error_count} errors, {len(hosts) - started_count - error_count} already running")
+
+    # 1. Start orchestrator checks (liveness + orchestrator safety)
+    logger.info("Starting orchestrator warden checks (liveness + PDisk + aggregated)")
+
+    # start_checks() is now synchronous - it submits to background event loop
+    orchestrator_started = orchestrator_warden_checker.start_checks()
+    results["master"] = {
+        "status": "started" if orchestrator_started else "already_running",
+        "type": "liveness"
+    }
+    logger.info(f"Orchestrator checks: {'started' if orchestrator_started else 'already running'}")
 
     return jsonify({"status": "ok", "results": results})
 
@@ -489,6 +477,7 @@ def get_warden_results_from_all_hosts():
                 # Direct call to avoid HTTP deadlock
                 from ydb.tests.stability.nemesis_app.routers.agent_router import get_warden_result_helper
                 result = get_warden_result_helper()
+                logger.debug(f"Agent {host} (local): status={result.get('status', 'unknown')}, checks={len(result.get('safety_checks', []))}")
                 return host, result
             else:
                 port = get_app_port()
@@ -496,6 +485,8 @@ def get_warden_results_from_all_hosts():
                 return host, resp.json()
         except Exception as e:
             logger.error(f"Failed to get warden result from {host}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return host, {"status": "error", "error_message": str(e)}
 
     with ThreadPoolExecutor(max_workers=min(len(hosts), 10)) as executor:

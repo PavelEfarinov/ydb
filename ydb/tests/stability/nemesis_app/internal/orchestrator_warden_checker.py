@@ -1,6 +1,5 @@
 """Orchestrator-side liveness and safety checks collector."""
 
-import asyncio
 import json
 import logging
 import subprocess
@@ -17,6 +16,7 @@ from ydb.tests.stability.nemesis_app.internal.agent_warden_checker import (
     WardenCheckReport,
     agent_safety_warden_factory,
 )
+from ydb.tests.stability.nemesis_app.internal.event_loop import BackgroundEventLoop
 
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,31 @@ def liveness_warden_factory() -> List[Dict[str, Any]]:
         {
             'name': 'TxCompleteLag',
             'description': 'Check transaction completion lag',
+        },
+    ]
+
+
+def agent_safety_warden_factory() -> List[Dict[str, Any]]:
+    """
+    Returns list of agent safety warden definitions.
+    These run locally on each agent (log checks, dmesg, etc.).
+    """
+    return [
+        {
+            'name': 'GrepLogFileForMarkersSafetyWarden',
+            'description': 'Check kikimr.start logs for error markers',
+        },
+        {
+            'name': 'GrepGzippedLogFilesForMarkersSafetyWarden',
+            'description': 'Check gzipped kikimr.start logs for error markers',
+        },
+        {
+            'name': 'GrepDMesgForPatternsSafetyWarden',
+            'description': 'Check dmesg for OOM and other critical patterns',
+        },
+        {
+            'name': 'UnifiedAgentVerifyFailedSafetyWarden',
+            'description': 'Check unified_agent logs for VERIFY failed errors',
         },
     ]
 
@@ -151,6 +176,7 @@ class OrchestratorWardenChecker:
         self._hosts = hosts or []
         self._mon_port = mon_port
         self._cluster = None
+        self._event_loop = BackgroundEventLoop()
 
     def set_hosts(self, hosts: List[str], mon_port: int = None):
         """Set hosts to monitor."""
@@ -170,27 +196,8 @@ class OrchestratorWardenChecker:
         with self._lock:
             return self._last_report.to_dict()
 
-    def get_available_checks(self) -> List[Dict[str, Any]]:
-        """Return available checks for master."""
-        checks = []
-        for w in liveness_warden_factory():
-            checks.append({
-                'name': w['name'],
-                'category': 'liveness',
-                'description': w['description'],
-                'location': 'master'
-            })
-        for w in orchestrator_safety_warden_factory():
-            checks.append({
-                'name': w['name'],
-                'category': 'safety',
-                'description': w['description'],
-                'location': 'master'
-            })
-        return checks
-
-    async def start_checks(self) -> bool:
-        """Start liveness checks asynchronously."""
+    def start_checks(self) -> bool:
+        """Start liveness checks in the background event loop."""
         with self._lock:
             if self._is_running:
                 logger.debug("Orchestrator checks already running, skipping")
@@ -201,21 +208,18 @@ class OrchestratorWardenChecker:
                 started_at=datetime.utcnow().isoformat() + 'Z'
             )
 
-        logger.info("Starting orchestrator warden checks in background thread")
+        logger.info("Starting orchestrator warden checks in background event loop")
 
-        # Run checks in background thread
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, self._run_checks_sync)
+        # Submit async checks to background event loop
+        self._event_loop.submit(self._run_checks_async())
         return True
 
-    def _run_checks_sync(self):
-        """Run checks synchronously with progress updates."""
+    async def _run_checks_async(self):
+        """Run checks asynchronously in the background event loop."""
         start_time = datetime.utcnow()
         logger.info("Orchestrator warden checks execution started")
 
         try:
-            # Run checks synchronously without creating a new event loop
-            # This avoids deadlock when run_in_executor is called inside
             cluster = self._get_cluster()
             liveness_results = []
             safety_results = []
@@ -253,7 +257,7 @@ class OrchestratorWardenChecker:
 
                 # Run aggregated VERIFY failed check
                 logger.debug("Running aggregated VERIFY failed check...")
-                aggregated_result = self._run_aggregated_verify_failed_check_sync()
+                aggregated_result = await self._run_aggregated_verify_failed_check_async()
                 safety_results.append(aggregated_result)
                 # Update report with current progress
                 with self._lock:
@@ -465,8 +469,9 @@ class OrchestratorWardenChecker:
 
         return results
 
-    def _run_aggregated_verify_failed_check_sync(self, max_wait_seconds: int = 120, poll_interval_seconds: float = 2.0) -> WardenCheckResult:
+    async def _run_aggregated_verify_failed_check_async(self, max_wait_seconds: int = 120, poll_interval_seconds: float = 2.0) -> WardenCheckResult:
         """Aggregate VERIFY failed errors from all agents."""
+        import asyncio
         import requests
         from ydb.tests.stability.nemesis_app.routers.orchestrator_router import hosts, get_app_port, is_local_host
 
@@ -513,7 +518,7 @@ class OrchestratorWardenChecker:
 
             if pending_hosts:
                 logger.debug(f"Still waiting for {len(pending_hosts)} agents: {pending_hosts}")
-                time.sleep(poll_interval_seconds)
+                await asyncio.sleep(poll_interval_seconds)
             else:
                 all_completed = True
 
@@ -567,13 +572,14 @@ class OrchestratorWardenChecker:
         # Add warning if some agents didn't complete in time
         error_message = None
         if pending_hosts:
+            aggregated_violations.append(f"Timeout: agents {list(pending_hosts)} did not complete in {max_wait_seconds}s")
             error_message = f"Timeout: agents {list(pending_hosts)} did not complete in {max_wait_seconds}s"
 
         return WardenCheckResult(
             name='UnifiedAgentVerifyFailedAggregated',
             category='safety',
             violations=aggregated_violations,
-            status='violation' if aggregated_violations else 'ok',
+            status='violation' if aggregated_violations or error_message else 'ok',
             error_message=error_message,
             affected_hosts=verify_failed_hosts
         )

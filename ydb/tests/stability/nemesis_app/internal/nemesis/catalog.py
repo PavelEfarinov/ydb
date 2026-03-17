@@ -1,22 +1,160 @@
-# -*- coding: utf-8 -*-
-"""
-Local-only nemesis implementations for nemesis_app.
-These nemesis classes execute only on localhost without SSH calls.
-
-Architecture:
-- prepare_fault() runs on the orchestrator node and determines which hosts to target
-- inject_fault() and extract_fault() run on the agent (localhost)
-"""
+import signal
 import logging
 import random
-import socket
 import subprocess
-import signal
+import time
+from ydb.tests.tools.nemesis.library import base
+from ydb.tests.library.nemesis.network.client import NetworkClient
+import socket
 
-from ydb.tests.stability.nemesis_app.internal.defaults import AbstractAgentNemesis
 from ydb.tests.library.common.types import TabletTypes
 from ydb.tests.library.clients.kikimr_client import kikimr_client_factory
 from ydb.tests.library.clients.kikimr_http_client import HiveClient
+
+
+class AbstractAgentNemesis(base.AbstractMonitoredNemesis):
+    """Base class for agent-based nemesis implementations. Provides fault injection/extraction infrastructure."""
+
+    def __init__(self):
+        base.AbstractMonitoredNemesis.__init__(self, scope='node')
+        self.__logger = logging.getLogger(self.__class__.__name__)
+
+    def extract_fault(self):
+        """Remove the fault from the system. Override in subclasses for specific cleanup logic."""
+        self.__logger.info("Extracting fault")
+
+    def inject_fault(self):
+        self.__logger.info("=== INJECT_FAULT START: %s ===", str(self))
+        self.on_success_inject_fault()
+        self.__logger.info("=== INJECT_FAULT SUCCESS: %s ===", str(self))
+
+    def prepare_fault(self, hosts, config):
+        """
+        Determine the action (inject/extract) and target hosts for the next execution.
+
+        Args:
+            hosts: List of available hosts in the cluster
+            config: Configuration dictionary with nemesis-specific settings
+
+        Returns:
+            tuple: (action, target_hosts) where action is 'inject' or 'extract',
+                   and target_hosts is a list of hostnames to target
+
+        Default behavior: Randomly selects one host for injection.
+        Override in subclasses for more complex targeting logic.
+        """
+        if hosts:
+            return 'inject', [random.choice(hosts)]
+        return None, []
+
+    @property
+    def nemesis_description(self):
+        """Return the docstring of the nemesis class as its description."""
+        return self.__class__.__doc__
+
+
+class NetworkNemesis(AbstractAgentNemesis):
+    """Simulates network partitions by isolating nodes. Gradually affects up to max_affected_nodes (default: 4), then restores all."""
+
+    def __init__(self):
+        super(NetworkNemesis, self).__init__()
+        self.__logger = logging.getLogger(self.__class__.__name__)
+        self.affected_hosts = set()
+
+    def prepare_fault(self, hosts, config):
+        """
+        Implements stateful network isolation logic.
+
+        Accumulates isolated hosts up to max_affected_nodes, then performs
+        a full rollback to restore all nodes simultaneously.
+        """
+        max_affected = config.get('max_affected_nodes', 4)
+
+        if len(self.affected_hosts) >= max_affected:
+            # Rollback all
+            targets = list(self.affected_hosts)
+            self.affected_hosts.clear()
+            return 'extract', targets
+        else:
+            # Inject fault on a new random host
+            available_hosts = [h for h in hosts if h not in self.affected_hosts]
+            if available_hosts:
+                target_host = random.choice(available_hosts)
+                self.affected_hosts.add(target_host)
+                return 'inject', [target_host]
+            return None, []
+
+    def inject_fault(self):
+        """Isolate the node from the network by dropping all packets."""
+        self.__logger.info("=== INJECT_FAULT START: %s ===", str(self))
+        client = NetworkClient('localhost', port=19001, ssh_username=None)
+        self.__logger.info("Isolating node...")
+        client.isolate_node()
+        self.on_success_inject_fault()
+        self.__logger.info("=== INJECT_FAULT SUCCESS: %s ===", str(self))
+
+    def extract_fault(self):
+        """Restore network connectivity by clearing all packet drops."""
+        self.__logger.info("Extracting fault")
+        client = NetworkClient('localhost', port=19001, ssh_username=None)
+        self.__logger.info("Restoring node...")
+        client.clear_all_drops()
+
+
+class KillNodeNemesis(AbstractAgentNemesis):
+    """Terminates YDB node processes with SIGKILL to simulate node failures."""
+
+    def __init__(self):
+        super(KillNodeNemesis, self).__init__()
+        self.__logger = logging.getLogger(self.__class__.__name__)
+
+    def inject_fault(self):
+        """Kill the YDB node process using SIGKILL."""
+        cmd = "ps aux | grep '\\--ic-port' | grep -v grep | awk '{ print $2 }' | shuf -n 1 | xargs -r sudo kill -%d" % (
+            int(signal.SIGKILL),
+        )
+        self.__logger.info(f"Executing: {cmd}")
+        subprocess.check_call(cmd, shell=True)
+
+
+class ShellNemesis(AbstractAgentNemesis):
+    """Executes custom shell commands for flexible fault injection scenarios."""
+
+    def __init__(self, cmd):
+        super(ShellNemesis, self).__init__()
+        self.__logger = logging.getLogger(self.__class__.__name__)
+        self.cmd = cmd
+
+    def inject_fault(self):
+        """Execute the configured shell command."""
+        self.__logger.info(f"Executing: {self.cmd}")
+        subprocess.check_call(self.cmd, shell=True)
+
+
+class TestLongNemesis(AbstractAgentNemesis):
+    """Test nemesis that runs for 150 seconds. Used for testing long-running operations and UI responsiveness."""
+
+    def __init__(self):
+        super(TestLongNemesis, self).__init__()
+        self.__logger = logging.getLogger(self.__class__.__name__)
+
+    def inject_fault(self):
+        """Run a 150-second loop with progress logging."""
+        for i in range(150):
+            self.__logger.info(f"Iteration: {i}")
+            time.sleep(1)
+
+
+class ThrowingNemesis(AbstractAgentNemesis):
+    """Test nemesis that always throws an exception. Used for testing error handling."""
+
+    def __init__(self):
+        super(ThrowingNemesis, self).__init__()
+        self.__logger = logging.getLogger(self.__class__.__name__)
+
+    def inject_fault(self):
+        """Raise an exception to simulate a failed operation."""
+        raise Exception('some custom exception')
 
 
 # =============================================================================
@@ -663,122 +801,6 @@ class DataCenterStopNodesNemesis(AbstractAgentNemesis):
 
 
 # =============================================================================
-# Bridge Pile Nemesis - Bridge-aware nemesis for bridge pile switching
-# =============================================================================
-
-class BridgePileIptablesBlockPortsNemesis(AbstractAgentNemesis):
-    """Blocks YDB ports using iptables on localhost for bridge pile isolation."""
-
-    def __init__(self, duration=60):
-        super(BridgePileIptablesBlockPortsNemesis, self).__init__()
-        self._logger = logging.getLogger(self.__class__.__name__)
-        self._duration = duration
-        self._block_ports_cmd = (
-            "sudo /sbin/ip6tables -w -A YDB_FW -p tcp -m multiport "
-            "--ports 2135,2136,8765,19001,31000:32000 -j REJECT"
-        )
-        self._restore_ports_cmd = (
-            "sudo /sbin/ip6tables -w -F YDB_FW"
-        )
-
-    def inject_fault(self):
-        """Block YDB ports using iptables."""
-        self._logger.info("=== INJECT_FAULT START: BridgePileIptablesBlockPortsNemesis ===")
-        try:
-            # Block ports and schedule automatic recovery
-            block_and_recover_cmd = (
-                f"nohup bash -c '{self._block_ports_cmd} && sleep {self._duration} && "
-                f"{self._restore_ports_cmd}' > /dev/null 2>&1 &"
-            )
-            subprocess.check_call(block_and_recover_cmd, shell=True)
-            self._logger.info("Blocked YDB ports and scheduled automatic recovery")
-            self.on_success_inject_fault()
-        except subprocess.CalledProcessError as e:
-            self._logger.error("Failed to block YDB ports: %s", str(e))
-
-    def extract_fault(self):
-        """YDB ports are automatically restored via sleep command scheduled during injection."""
-        self._logger.info("Skipping manual port restoration - automatic recovery via sleep command is scheduled")
-
-
-class BridgePileRouteUnreachableNemesis(AbstractAgentNemesis):
-    """Makes network routes unreachable on localhost for bridge pile isolation."""
-
-    def __init__(self, duration=60):
-        super(BridgePileRouteUnreachableNemesis, self).__init__()
-        self._logger = logging.getLogger(self.__class__.__name__)
-        self._duration = duration
-        self._block_cmd_template = (
-            'sudo /usr/bin/ip -6 ro replace unreach {} || sudo /usr/bin/ip -6 ro add unreach {}'
-        )
-        self._restore_cmd_template = (
-            'sudo /usr/bin/ip -6 ro del unreach {}'
-        )
-        self._blocked_ips = []
-
-    def _resolve_hostname_to_ip(self, hostname):
-        """Resolve hostname to IP address."""
-        try:
-            result = socket.getaddrinfo(hostname, None, socket.AF_INET6)
-            if result:
-                return result[0][4][0]
-        except socket.gaierror:
-            pass
-        return None
-
-    def inject_fault(self):
-        """Block network routes to specified IPs."""
-        self._logger.info("=== INJECT_FAULT START: BridgePileRouteUnreachableNemesis ===")
-        # This nemesis would need target IPs from prepare_fault
-        # For now, it's a placeholder that can be configured with specific IPs
-        self.on_success_inject_fault()
-
-    def extract_fault(self):
-        """Restore blocked network routes."""
-        for ip in self._blocked_ips:
-            try:
-                cmd = self._restore_cmd_template.format(ip)
-                subprocess.check_call(cmd, shell=True)
-                self._logger.info("Restored route to %s", ip)
-            except subprocess.CalledProcessError as e:
-                self._logger.error("Failed to restore route to %s: %s", ip, str(e))
-        self._blocked_ips = []
-
-
-class BridgePileStopNodesNemesis(AbstractAgentNemesis):
-    """Stops the local YDB node for bridge pile isolation."""
-
-    def __init__(self, duration=60):
-        super(BridgePileStopNodesNemesis, self).__init__()
-        self._logger = logging.getLogger(self.__class__.__name__)
-        self._duration = duration
-        self._is_stopped = False
-
-    def inject_fault(self):
-        """Stop the local YDB node."""
-        self._logger.info("=== INJECT_FAULT START: BridgePileStopNodesNemesis ===")
-        try:
-            cmd = "sudo systemctl stop kikimr"
-            subprocess.check_call(cmd, shell=True)
-            self._is_stopped = True
-            self._logger.info("Stopped kikimr service")
-            self.on_success_inject_fault()
-        except subprocess.CalledProcessError as e:
-            self._logger.error("Failed to stop kikimr: %s", str(e))
-
-    def extract_fault(self):
-        """Start the local YDB node."""
-        if self._is_stopped:
-            try:
-                cmd = "sudo systemctl start kikimr"
-                subprocess.check_call(cmd, shell=True)
-                self._is_stopped = False
-                self._logger.info("Started kikimr service")
-            except subprocess.CalledProcessError as e:
-                self._logger.error("Failed to start kikimr: %s", str(e))
-
-
-# =============================================================================
 # Export all nemesis classes for use in defaults.py
 # =============================================================================
 
@@ -866,14 +888,94 @@ NODE_NEMESIS_TYPES = {
     },
 }
 
+# Base PROCESS_TYPES - additional types are added from tmp_nemesis below
+_BASE_PROCESS_TYPES = {
+    # Test nemesis
+    "TestShellNemesis": {
+        "runner": ShellNemesis("echo 'Type 1 process started'; sleep 1; echo 'Type 1 output' >&2; sleep 1; echo 'Type 1 finished'"),
+        "schedule": 10
+    },
+    "TestLongNemesis": {
+        "runner": TestLongNemesis(),
+        "schedule": 2000
+    },
+    "ThrowingNemesis": {
+        "runner": ThrowingNemesis(),
+        "schedule": 10
+    },
+    # Network nemesis
+    "NetworkNemesis": {
+        "runner": NetworkNemesis(),
+        "schedule": 200
+    },
+    # Node killer
+    "NodeKiller": {
+        "runner": KillNodeNemesis(),
+        "schedule": 300
+    },
+}
+
+
 # Combined dictionary of all nemesis types from this module
 ALL_NEMESIS_TYPES = {
     **TABLET_NEMESIS_TYPES,
     **HIVE_NEMESIS_TYPES,
     **NODE_NEMESIS_TYPES,
+    **_BASE_PROCESS_TYPES,
 }
 
 
 def get_all_nemesis_types():
     """Returns a list of all available nemesis type names from this module."""
     return list(ALL_NEMESIS_TYPES.keys())
+
+
+def _get_process_types():
+    """
+    Lazily load and merge all process types to avoid circular imports.
+    tmp_nemesis imports AbstractAgentNemesis from this module,
+    so we need to delay importing ALL_NEMESIS_TYPES until after class definitions.
+    """
+    return {**ALL_NEMESIS_TYPES}
+
+
+# PROCESS_TYPES is populated lazily on first access
+class _ProcessTypesProxy(dict):
+    """Proxy dict that lazily loads process types on first access."""
+    _loaded = False
+
+    def _ensure_loaded(self):
+        if not self._loaded:
+            self.update(_get_process_types())
+            self._loaded = True
+
+    def __getitem__(self, key):
+        self._ensure_loaded()
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        self._ensure_loaded()
+        return super().__contains__(key)
+
+    def __iter__(self):
+        self._ensure_loaded()
+        return super().__iter__()
+
+    def keys(self):
+        self._ensure_loaded()
+        return super().keys()
+
+    def values(self):
+        self._ensure_loaded()
+        return super().values()
+
+    def items(self):
+        self._ensure_loaded()
+        return super().items()
+
+    def get(self, key, default=None):
+        self._ensure_loaded()
+        return super().get(key, default)
+
+
+PROCESS_TYPES = _ProcessTypesProxy()
