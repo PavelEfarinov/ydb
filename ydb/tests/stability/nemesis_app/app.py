@@ -107,8 +107,9 @@ def create_app():
 
     app = Flask(__name__, static_folder=static_folder, static_url_path='/static')
 
-    # Register teardown handler
-    app.teardown_appcontext(cleanup_app)
+    # Register cleanup for application shutdown (not per-request teardown)
+    import atexit
+    atexit.register(cleanup_app)
 
     # Common health endpoint
     @app.route("/health", methods=["GET"])

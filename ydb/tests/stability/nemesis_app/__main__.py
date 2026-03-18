@@ -19,7 +19,7 @@ def parse_args():
         'command',
         nargs='?',
         choices=['run', 'stop', 'liveness', 'install'],
-        help='Command to run: run (install and run nemesis services), stop (stop nemesis services), liveness (run liveness checks)'
+        help='Command to run: install (install and run nemesis services), stop (stop nemesis services), liveness (run liveness checks), run (run agent)'
     )
 
     # Optional settings arguments (override env and defaults)

@@ -18,6 +18,7 @@ class AbstractAgentNemesis(base.AbstractMonitoredNemesis):
     def __init__(self):
         base.AbstractMonitoredNemesis.__init__(self, scope='node')
         self.__logger = logging.getLogger(self.__class__.__name__)
+        self.affected_hosts = set()
 
     def extract_fault(self):
         """Remove the fault from the system. Override in subclasses for specific cleanup logic."""
@@ -44,7 +45,9 @@ class AbstractAgentNemesis(base.AbstractMonitoredNemesis):
         Override in subclasses for more complex targeting logic.
         """
         if hosts:
-            return 'inject', [random.choice(hosts)]
+            new_host = random.choice(hosts)
+            self.affected_hosts.add(random.choice(hosts))
+            return 'inject', [new_host]
         return None, []
 
     @property
@@ -529,6 +532,15 @@ class StopStartNodeNemesis(AbstractAgentNemesis):
         self._service_name = service_name
         self._stop_duration = stop_duration
         self._is_stopped = False
+
+    def prepare_fault(self, hosts, config):
+        if self._is_stopped:
+            new_host = random.choice(hosts)
+            self.affected_hosts.add(new_host)
+            return 'inject', [new_host]
+        else:
+            self._is_stopped = False
+            return 'extract', [self.affected_hosts.pop()]
 
     def inject_fault(self):
         """Stop the YDB service."""

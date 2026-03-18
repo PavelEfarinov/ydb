@@ -95,6 +95,19 @@ def schedule_process(process_type: str, nemesis_config: dict, custom_interval: i
     while True:
         with scheduled_tasks_lock:
             if process_type not in scheduled_tasks or not scheduled_tasks[process_type]['enabled']:
+                if not scheduled_tasks[process_type]['enabled']:
+                    target_hosts = PROCESS_TYPES[process_type].affected_hosts
+                    logger.info(f"Extracting {process_type} from {target_hosts}")
+                    with ThreadPoolExecutor(max_workers=min(len(target_hosts), 10)) as executor:
+                        futures = [
+                            executor.submit(run_process_on_host, host, process_type, "extract", True)
+                            for host in target_hosts
+                        ]
+                        for future in as_completed(futures):
+                            try:
+                                future.result()
+                            except Exception as e:
+                                print(f"Error in scheduled task: {e}")
                 break
 
         # Get config for this process type
@@ -111,6 +124,7 @@ def schedule_process(process_type: str, nemesis_config: dict, custom_interval: i
 
             if action and target_hosts:
                 # Run processes on hosts in parallel using thread pool
+                logger.info(f"Running {action} of {process_type} into {target_hosts}")
                 with ThreadPoolExecutor(max_workers=min(len(target_hosts), 10)) as executor:
                     futures = [
                         executor.submit(run_process_on_host, host, process_type, action, True)

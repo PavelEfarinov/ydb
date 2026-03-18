@@ -14,7 +14,6 @@ from ydb.tests.stability.nemesis_app.internal.config import get_master_settings
 from ydb.tests.stability.nemesis_app.internal.agent_warden_checker import (
     WardenCheckResult,
     WardenCheckReport,
-    agent_safety_warden_factory,
 )
 from ydb.tests.stability.nemesis_app.internal.event_loop import BackgroundEventLoop
 
