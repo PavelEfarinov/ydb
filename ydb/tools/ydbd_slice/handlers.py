@@ -238,6 +238,7 @@ class Slice:
             if self.v2:
                 self.__cluster_bootstrap()
             else:
+                time.sleep(30)
                 self.__init_blobstorage_kikimr()
                 # Old bootstrap via proto files
                 # self._dynamic_configure()
